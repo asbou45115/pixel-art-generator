@@ -416,12 +416,14 @@ export async function resolvePixelateOptions(source, options = {}) {
   return { ...options, autoPalette: false, paletteColors: colors };
 }
 
-export async function pixelateFrames(sources, options = {}, onProgress) {
+export async function pixelateFrames(sources, options = {}, onProgress, signal) {
   const resolved = await resolvePixelateOptions(sources[0], options);
   const results = [];
   for (let i = 0; i < sources.length; i++) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     results.push(await pixelateImage(sources[i], resolved));
     onProgress?.(i + 1, sources.length);
+    if (i < sources.length - 1) await new Promise((r) => setTimeout(r, 0));
   }
   return results;
 }

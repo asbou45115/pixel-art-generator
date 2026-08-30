@@ -21,7 +21,7 @@ function canvasFromSource(source, w, h) {
   return canvas;
 }
 
-async function decodeGifFrames(file, onProgress) {
+async function decodeGifFrames(file, onProgress, signal) {
   if (!('ImageDecoder' in window)) {
     throw new Error('Animated GIF requires a modern browser with ImageDecoder support.');
   }
@@ -40,7 +40,8 @@ async function decodeGifFrames(file, onProgress) {
   let height = 0;
 
   for (let i = 0; i < take; i++) {
-    onProgress?.(`Decoding frame ${i + 1} of ${take}…`);
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    onProgress?.(`Decoding frame ${i + 1} of ${take}…`, i + 1, take);
     const index = Math.min(frameCount - 1, Math.floor(i * step));
     const { image } = await decoder.decode({ frameIndex: index });
     width = image.displayWidth;
@@ -85,7 +86,7 @@ function seekVideo(video, time) {
   });
 }
 
-async function extractVideoFrames(video, onProgress) {
+async function extractVideoFrames(video, onProgress, signal) {
   const duration = Math.min(video.duration || 0, MAX_VIDEO_DURATION);
   if (!duration || !video.videoWidth) throw new Error('Video has no readable frames.');
 
@@ -96,7 +97,8 @@ async function extractVideoFrames(video, onProgress) {
   const delay = 1000 / VIDEO_SAMPLE_FPS;
 
   for (let i = 0; i < frameCount; i++) {
-    onProgress?.(`Extracting frame ${i + 1} of ${frameCount}…`);
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    onProgress?.(`Extracting frame ${i + 1} of ${frameCount}…`, i + 1, frameCount);
     const t = frameCount === 1 ? 0 : (i / (frameCount - 1)) * duration;
     await seekVideo(video, t);
     frames.push({
@@ -113,11 +115,12 @@ async function extractVideoFrames(video, onProgress) {
   };
 }
 
-export async function loadMediaFile(file, onProgress) {
+export async function loadMediaFile(file, onProgress, signal) {
   const kind = detectMediaKind(file);
   if (!kind) throw new Error('Unsupported file type.');
 
   onProgress?.('Reading file…');
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   const url = URL.createObjectURL(file);
 
   if (kind === 'image') {
@@ -130,7 +133,7 @@ export async function loadMediaFile(file, onProgress) {
   }
 
   if (kind === 'gif') {
-    const { frames, width, height } = await decodeGifFrames(file, onProgress);
+    const { frames, width, height } = await decodeGifFrames(file, onProgress, signal);
     if (frames.length === 1) {
       return {
         kind: 'image',
@@ -154,7 +157,7 @@ export async function loadMediaFile(file, onProgress) {
   onProgress?.('Loading video…');
   const video = await loadVideoElement(url);
   onProgress?.('Extracting frames from video…');
-  const { frames, width, height, duration } = await extractVideoFrames(video, onProgress);
+  const { frames, width, height, duration } = await extractVideoFrames(video, onProgress, signal);
   video.removeAttribute('src');
   video.load();
 

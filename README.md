@@ -14,7 +14,9 @@ Then open http://localhost:8080
 
 - Upload PNG, JPG, GIF, WEBP, MP4, or WebM — no file size limit (client-side only)
 - Animated GIF and video support with a frame strip to preview individual frames
-- Export animations as GIF or MP4 (full render on export)
+- Play animation preview in the browser before exporting
+- Header export controls: upload file, format, output size, and download
+- Export animations as GIF or MP4 with progress bar and cancel support
 - Live pixel size, brightness, contrast, saturation controls
 - Built-in palettes (Pico-8, Lost Century, Game Boy, NES, and more)
 - Auto palette extracted from the source (shared across animation frames on export)
@@ -43,6 +45,7 @@ assets/
     upload.js        Upload zone
     media-source.js  GIF/video frame loading
     media-export.js  GIF/MP4 export
+    progress.js      Cancellable task overlay with progress
     gifenc.js        GIF encoder (vendored)
     mp4-muxer.js     MP4 muxer (vendored)
 ```

@@ -1,5 +1,6 @@
 import { GIFEncoder, quantize, applyPalette } from './gifenc.js';
 import { scaleCanvas } from './pixelate.js';
+import { throwIfAborted, yieldToMain } from './progress.js';
 
 function downloadBlob(blob, filename) {
   const a = document.createElement('a');
@@ -17,12 +18,13 @@ export function pickExportCanvas(result, exportSize) {
   return out;
 }
 
-export function encodeGif(results, delays, exportSize = 'pixel') {
+export async function encodeGif(results, delays, exportSize = 'pixel', onProgress, signal) {
   const encoder = GIFEncoder();
   let width = 0;
   let height = 0;
 
   for (let i = 0; i < results.length; i++) {
+    throwIfAborted(signal);
     const canvas = pickExportCanvas(results[i], exportSize);
     width = canvas.width;
     height = canvas.height;
@@ -35,6 +37,8 @@ export function encodeGif(results, delays, exportSize = 'pixel') {
       first: i === 0,
       repeat: 0,
     });
+    onProgress?.(i + 1, results.length);
+    await yieldToMain();
   }
 
   encoder.finish();
@@ -52,7 +56,7 @@ function pickRecorderMimeType() {
   return types.find((t) => MediaRecorder.isTypeSupported(t)) || null;
 }
 
-async function encodeMp4WithWebCodecs(results, delays, exportSize, onProgress) {
+async function encodeMp4WithWebCodecs(results, delays, exportSize, onProgress, signal) {
   const { Muxer, ArrayBufferTarget } = await import('./mp4-muxer.js');
   const first = pickExportCanvas(results[0], exportSize);
   const width = first.width;
@@ -78,13 +82,14 @@ async function encodeMp4WithWebCodecs(results, delays, exportSize, onProgress) {
 
   let timestampUs = 0;
   for (let i = 0; i < results.length; i++) {
+    throwIfAborted(signal);
     const frameCanvas = pickExportCanvas(results[i], exportSize);
     const frame = new VideoFrame(frameCanvas, { timestamp: timestampUs });
     encoder.encode(frame, { keyFrame: i % 30 === 0 });
     frame.close();
     timestampUs += (delays[i] || 100) * 1000;
     onProgress?.(i + 1, results.length);
-    await new Promise((r) => setTimeout(r, 0));
+    await yieldToMain();
   }
 
   await encoder.flush();
@@ -93,7 +98,7 @@ async function encodeMp4WithWebCodecs(results, delays, exportSize, onProgress) {
   return new Blob([muxer.target.buffer], { type: 'video/mp4' });
 }
 
-async function encodeMp4WithRecorder(results, delays, exportSize, onProgress) {
+async function encodeMp4WithRecorder(results, delays, exportSize, onProgress, signal) {
   const mime = pickRecorderMimeType();
   if (!mime) throw new Error('This browser cannot encode MP4 video.');
 
@@ -123,6 +128,7 @@ async function encodeMp4WithRecorder(results, delays, exportSize, onProgress) {
   recorder.start(100);
 
   for (let i = 0; i < results.length; i++) {
+    throwIfAborted(signal);
     const frameCanvas = pickExportCanvas(results[i], exportSize);
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, width, height);
@@ -137,25 +143,25 @@ async function encodeMp4WithRecorder(results, delays, exportSize, onProgress) {
   return new Blob(chunks, { type: ext });
 }
 
-export async function encodeMp4(results, delays, exportSize = 'pixel', onProgress) {
+export async function encodeMp4(results, delays, exportSize = 'pixel', onProgress, signal) {
   if (!results.length) throw new Error('No frames to export.');
   if (typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined') {
     try {
-      return await encodeMp4WithWebCodecs(results, delays, exportSize, onProgress);
-    } catch {
-      // Fall through to MediaRecorder
+      return await encodeMp4WithWebCodecs(results, delays, exportSize, onProgress, signal);
+    } catch (err) {
+      if (err?.name === 'AbortError') throw err;
     }
   }
-  return encodeMp4WithRecorder(results, delays, exportSize, onProgress);
+  return encodeMp4WithRecorder(results, delays, exportSize, onProgress, signal);
 }
 
-export function downloadGif(results, delays, exportSize) {
-  const blob = encodeGif(results, delays, exportSize);
+export async function downloadGif(results, delays, exportSize, onProgress, signal) {
+  const blob = await encodeGif(results, delays, exportSize, onProgress, signal);
   downloadBlob(blob, 'pixel-art.gif');
 }
 
-export async function downloadMp4(results, delays, exportSize, onProgress) {
-  const blob = await encodeMp4(results, delays, exportSize, onProgress);
+export async function downloadMp4(results, delays, exportSize, onProgress, signal) {
+  const blob = await encodeMp4(results, delays, exportSize, onProgress, signal);
   const ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
   downloadBlob(blob, `pixel-art.${ext}`);
 }
