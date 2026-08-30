@@ -17,6 +17,9 @@ const DEFAULTS = {
   autoPalette: false,
   paletteSize: 16,
   colorDistance: 'rgb',
+  edges: 'none',
+  edgeThreshold: 50,
+  edgeThickness: 1,
   showGrid: false,
   exportFormat: 'png',
   exportSize: 'source',
@@ -51,6 +54,9 @@ function buildPixelateOptions(state, paletteColors) {
     outputWidth: state.outputWidth,
     outputHeight: state.outputHeight,
     outputFit: state.outputFit,
+    edges: state.edges,
+    edgeThreshold: state.edgeThreshold,
+    edgeThickness: state.edgeThickness,
   };
 }
 
@@ -65,6 +71,9 @@ function settingsKey(state) {
     ditherStrength: state.ditherStrength,
     paletteSize: state.paletteSize,
     colorDistance: state.colorDistance,
+    edges: state.edges,
+    edgeThreshold: state.edgeThreshold,
+    edgeThickness: state.edgeThickness,
   });
 }
 
@@ -155,6 +164,26 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
         <div class="control-group" id="dither-strength-group">
           <label>Dither strength <span id="val-ditherStrength">${state.ditherStrength}%</span></label>
           <input type="range" id="ditherStrength" min="0" max="100" value="${state.ditherStrength}">
+        </div>
+      </fieldset>
+
+      <fieldset class="control-block">
+        <legend>Outlines</legend>
+        <div class="control-group">
+          <label for="edgeMethod">Edge detection</label>
+          <select id="edgeMethod">
+            <option value="none">None</option>
+            <option value="sobel">Sobel</option>
+            <option value="canny">Canny</option>
+          </select>
+        </div>
+        <div class="control-group hidden" id="edge-threshold-group">
+          <label>Edge threshold <span id="val-edgeThreshold">${state.edgeThreshold}</span></label>
+          <input type="range" id="edgeThreshold" min="1" max="255" value="${state.edgeThreshold}">
+        </div>
+        <div class="control-group hidden" id="edge-thickness-group">
+          <label>Line thickness <span id="val-edgeThickness">${state.edgeThickness}</span></label>
+          <input type="range" id="edgeThickness" min="1" max="5" value="${state.edgeThickness}">
         </div>
       </fieldset>
 
@@ -674,11 +703,17 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     });
   }
 
-  ['pixelSize', 'brightness', 'contrast', 'saturation', 'paletteSize', 'ditherStrength'].forEach((k) => bindRange(k, k));
+  ['pixelSize', 'brightness', 'contrast', 'saturation', 'paletteSize', 'ditherStrength', 'edgeThreshold', 'edgeThickness'].forEach((k) => bindRange(k, k));
 
   function updateDitherStrengthVisibility() {
     const show = state.dither !== 'none';
     root.querySelector('#dither-strength-group').style.display = show ? 'block' : 'none';
+  }
+
+  function updateEdgeControlsVisibility() {
+    const show = state.edges !== 'none';
+    root.querySelector('#edge-threshold-group').classList.toggle('hidden', !show);
+    root.querySelector('#edge-thickness-group').classList.toggle('hidden', !show);
   }
 
   root.querySelector('#palette').addEventListener('change', (e) => {
@@ -693,6 +728,11 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   root.querySelector('#ditherMethod').addEventListener('change', (e) => {
     state.dither = e.target.value;
     updateDitherStrengthVisibility();
+    scheduleRender();
+  });
+  root.querySelector('#edgeMethod').addEventListener('change', (e) => {
+    state.edges = e.target.value;
+    updateEdgeControlsVisibility();
     scheduleRender();
   });
   root.querySelector('#showGrid').addEventListener('change', (e) => {
@@ -719,10 +759,12 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
       el.dispatchEvent(new Event('input'));
     });
     root.querySelector('#ditherMethod').value = state.dither;
+    root.querySelector('#edgeMethod').value = state.edges;
     root.querySelector('#colorDistance').value = state.colorDistance;
     if (exportSizeSelect) exportSizeSelect.value = state.exportSize;
     populateExportFormats();
     updateDitherStrengthVisibility();
+    updateEdgeControlsVisibility();
     root.querySelector('#showGrid').checked = state.showGrid;
     paletteSelect.value = state.palette;
     updatePaletteUI();
@@ -764,7 +806,9 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   }
   if (preset.palette && preset.palette !== 'from-image') paletteSelect.value = preset.palette;
   root.querySelector('#colorDistance').value = state.colorDistance;
+  root.querySelector('#edgeMethod').value = state.edges;
   updateDitherStrengthVisibility();
+  updateEdgeControlsVisibility();
 
   const resizeObserver = new ResizeObserver(() => fitPreview());
   resizeObserver.observe(previewContainer);
