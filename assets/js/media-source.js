@@ -20,6 +20,17 @@ function canvasFromSource(source, w, h) {
   return canvas;
 }
 
+function createAccessLock() {
+  let chain = Promise.resolve();
+  return {
+    run(fn) {
+      const result = chain.then(() => fn());
+      chain = result.catch(() => {});
+      return result;
+    },
+  };
+}
+
 function seekVideo(video, time) {
   return new Promise((resolve, reject) => {
     if (Math.abs(video.currentTime - time) < 0.001) {
@@ -158,6 +169,7 @@ export class GifAnimationSource {
     this.height = 0;
     this.delays = new Array(frameCount);
     this.indexed = true;
+    this._accessLock = createAccessLock();
     this._ready = this._init();
   }
 
@@ -184,20 +196,25 @@ export class GifAnimationSource {
   async getDelay(index) {
     await this.ready();
     if (this.delays[index] != null) return this.delays[index];
-    const { image } = await this.decoder.decode({ frameIndex: index });
-    this.delays[index] = image.duration ? Math.max(MIN_FRAME_DELAY, image.duration / 1000) : DEFAULT_FRAME_DELAY;
-    image.close();
-    return this.delays[index];
+    return this._accessLock.run(async () => {
+      if (this.delays[index] != null) return this.delays[index];
+      const { image } = await this.decoder.decode({ frameIndex: index });
+      this.delays[index] = image.duration ? Math.max(MIN_FRAME_DELAY, image.duration / 1000) : DEFAULT_FRAME_DELAY;
+      image.close();
+      return this.delays[index];
+    });
   }
 
   async getSourceFrame(index, signal) {
-    await this.ready();
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-    const { image } = await this.decoder.decode({ frameIndex: index });
-    this.delays[index] = image.duration ? Math.max(MIN_FRAME_DELAY, image.duration / 1000) : DEFAULT_FRAME_DELAY;
-    const canvas = canvasFromSource(image, image.displayWidth, image.displayHeight);
-    image.close();
-    return canvas;
+    return this._accessLock.run(async () => {
+      await this.ready();
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      const { image } = await this.decoder.decode({ frameIndex: index });
+      this.delays[index] = image.duration ? Math.max(MIN_FRAME_DELAY, image.duration / 1000) : DEFAULT_FRAME_DELAY;
+      const canvas = canvasFromSource(image, image.displayWidth, image.displayHeight);
+      image.close();
+      return canvas;
+    });
   }
 
   async forEachFrame(callback, onProgress, signal) {
@@ -232,6 +249,7 @@ export class VideoAnimationSource {
     this._indexPromise = null;
     this._indexAbort = null;
     this._frame0Canvas = null;
+    this._accessLock = createAccessLock();
     this._ready = this._captureFrame0();
   }
 
@@ -270,6 +288,8 @@ export class VideoAnimationSource {
     this.mediaTimes = result.mediaTimes;
     this.frameCount = result.frameCount;
     this.indexed = true;
+    await seekVideo(this.video, 0);
+    this._frame0Canvas = canvasFromSource(this.video, this.width, this.height);
   }
 
   async getDelay(index) {
@@ -280,19 +300,21 @@ export class VideoAnimationSource {
   }
 
   async getSourceFrame(index, signal) {
-    await this.ready();
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    return this._accessLock.run(async () => {
+      await this.ready();
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-    if (!this.indexed) {
-      if (index === 0) return this._frame0Canvas;
-      await this.startIndexing(null, signal);
-      if (this._indexPromise) await this._indexPromise;
-    }
+      if (!this.indexed) {
+        if (index === 0) return this._frame0Canvas;
+        await this.startIndexing(null, signal);
+        if (this._indexPromise) await this._indexPromise;
+      }
 
-    if (index === 0 && this._frame0Canvas) return this._frame0Canvas;
-
-    await seekVideo(this.video, this.mediaTimes[index]);
-    return canvasFromSource(this.video, this.width, this.height);
+      const time = this.mediaTimes[index];
+      if (time == null) throw new Error(`Frame ${index + 1} is not available.`);
+      await seekVideo(this.video, time);
+      return canvasFromSource(this.video, this.width, this.height);
+    });
   }
 
   async forEachFrame(callback, onProgress, signal) {

@@ -96,6 +96,8 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   let thumbCache = new Map();
   let indexController = null;
   let indexGeneration = 0;
+  let thumbLoaderGen = 0;
+  let thumbLoaderPriority = -1;
   let result = null;
   let renderTimer = null;
   let renderGeneration = 0;
@@ -373,7 +375,50 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
 
   function clearSourceFrameCache() {
     sourceFrameCache.clear();
-    thumbCache.clear();
+  }
+
+  function stopThumbLoader() {
+    thumbLoaderGen++;
+  }
+
+  function startThumbLoader(priorityIndex = -1) {
+    if (!isAnimation || isBusy) return;
+    if (animation?.label === 'Video' && !animation.isIndexed?.()) return;
+    if (priorityIndex >= 0) thumbLoaderPriority = priorityIndex;
+    const gen = ++thumbLoaderGen;
+    runThumbLoader(gen);
+  }
+
+  async function runThumbLoader(gen) {
+    while (gen === thumbLoaderGen) {
+      const count = getFrameCount();
+      let next = -1;
+
+      if (
+        thumbLoaderPriority >= 0
+        && thumbLoaderPriority < count
+        && !thumbCache.has(thumbLoaderPriority)
+      ) {
+        next = thumbLoaderPriority;
+        thumbLoaderPriority = -1;
+      } else {
+        for (let i = 0; i < count; i++) {
+          if (!thumbCache.has(i)) {
+            next = i;
+            break;
+          }
+        }
+      }
+
+      if (next < 0) return;
+
+      try {
+        await updateFrameThumb(next);
+      } catch {
+        thumbCache.delete(next);
+      }
+      await yieldToMain();
+    }
   }
 
   function updateIndexBadge(message) {
@@ -392,23 +437,40 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     buildFrameStrip();
     updateIndexBadge(null);
     if (playBtn) playBtn.disabled = isBusy;
+    renderFrameNow();
   }
 
   function startBackgroundIndexing() {
-    if (!animation || animation.isIndexed?.()) return;
+    if (!animation || animation.isIndexed?.()) {
+      startThumbLoader(selectedFrameIndex);
+      return;
+    }
+
+    stopThumbLoader();
 
     const gen = ++indexGeneration;
     indexController = new AbortController();
-    animation.startIndexing((msg, done, total) => {
+
+    animation.ready().then(async () => {
       if (gen !== indexGeneration) return;
-      const pct = done && total ? Math.round((done / total) * 100) : null;
-      updateIndexBadge(pct != null ? `Indexing ${pct}%` : msg);
-    }, indexController.signal).then(() => {
+      try {
+        await updateFrameThumb(0);
+      } catch {
+        /* thumb for frame 0 is optional before indexing */
+      }
       if (gen !== indexGeneration) return;
-      onAnimationIndexed();
-    }).catch((err) => {
-      if (gen !== indexGeneration || err?.name === 'AbortError') return;
-      updateIndexBadge('Indexing failed');
+
+      animation.startIndexing((msg, done, total) => {
+        if (gen !== indexGeneration) return;
+        const pct = done && total ? Math.round((done / total) * 100) : null;
+        updateIndexBadge(pct != null ? `Indexing ${pct}%` : msg);
+      }, indexController.signal).then(() => {
+        if (gen !== indexGeneration) return;
+        onAnimationIndexed();
+      }).catch((err) => {
+        if (gen !== indexGeneration || err?.name === 'AbortError') return;
+        updateIndexBadge('Indexing failed');
+      });
     });
   }
 
@@ -439,9 +501,10 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   }
 
   async function updateFrameThumb(i) {
+    if (thumbCache.has(i)) return;
+    const srcCanvas = await animation.getSourceFrame(i);
     const btn = frameStripScroll.querySelector(`[data-frame-index="${i}"]`);
     if (!btn || thumbCache.has(i)) return;
-    const srcCanvas = await getSourceFrame(i);
     const thumbCanvas = btn.querySelector('canvas');
     if (!thumbCanvas) return;
     const scale = THUMB_HEIGHT / srcCanvas.height;
@@ -462,6 +525,8 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     frameStrip.classList.remove('hidden');
     frameControls.classList.remove('hidden');
     frameStripScroll.innerHTML = '';
+    thumbCache.clear();
+    stopThumbLoader();
 
     const count = getFrameCount();
     for (let i = 0; i < count; i++) {
@@ -481,15 +546,33 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
       label.textContent = String(i + 1);
 
       btn.append(thumbCanvas, label);
-      btn.addEventListener('click', () => {
-        if (selectedFrameIndex === i) return;
-        stopPlayback();
-        selectedFrameIndex = i;
-        updateFrameStripActive();
-        scheduleRender();
-      });
+      btn.addEventListener('click', () => selectFrame(i));
       frameStripScroll.appendChild(btn);
-      updateFrameThumb(i);
+    }
+
+    if (animation?.label === 'Video' && !animation.isIndexed?.()) {
+      return;
+    }
+    startThumbLoader(selectedFrameIndex);
+  }
+
+  function selectFrame(i) {
+    if (selectedFrameIndex === i) return;
+    if (isPlaying) stopPlayback({ restore: false });
+    selectedFrameIndex = i;
+    updateFrameStripActive();
+    startThumbLoader(i);
+    renderFrameNow();
+  }
+
+  async function renderFrameNow() {
+    const generation = ++renderGeneration;
+    setLocalProcessing(true, 'Updating preview…');
+    try {
+      await renderPreviewFrame();
+      if (generation !== renderGeneration) return;
+    } finally {
+      if (generation === renderGeneration) setLocalProcessing(false);
     }
   }
 
@@ -760,6 +843,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     if (!result || isBusy) return;
     stopPlayback();
     isBusy = true;
+    stopThumbLoader();
     setHeaderDisabled(true);
 
     try {
@@ -783,6 +867,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     } finally {
       isBusy = false;
       setHeaderDisabled(false);
+      startThumbLoader(selectedFrameIndex);
     }
   }
 
@@ -891,7 +976,6 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
 
   mountHeaderControls();
   populatePalettes();
-  buildFrameStrip();
 
   if (preset.dither) {
     const method = typeof preset.dither === 'string' ? preset.dither : 'floyd-steinberg';
@@ -917,6 +1001,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     indexGeneration++;
     indexController?.abort();
     indexController = null;
+    stopThumbLoader();
     animation?.cancelIndexing?.();
     clearPlayCache();
     clearSourceFrameCache();
