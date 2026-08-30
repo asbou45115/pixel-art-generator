@@ -1,6 +1,9 @@
 # Pixel Art Generator
 
-A single-page browser tool that converts images, GIFs, and videos to pixel art with live preview, palettes, dithering, and private client-side processing.
+Browser tool that converts images, GIFs, and videos to pixel art with live preview, palettes, dithering, and private client-side processing.
+
+## Webpage:
+
 
 ## Run locally
 
@@ -10,22 +13,33 @@ py -m http.server 8080
 
 Then open http://localhost:8080
 
-## Try an example
+## Examples
 
-A sample animated GIF is included for testing:
+### Still image - Mount Fuji
 
-- File: [`assets/examples/gif_example.gif`](assets/examples/gif_example.gif)
-- In the app: upload it from the landing page, or use **Upload file** in the editor header after opening any image
+| Before | After |
+| --- | --- |
+| ![Mount Fuji original](assets/examples/mt_fuji_before.png) | ![Mount Fuji pixel art](assets/examples/mt_fuji_after.png) |
 
-Use it to try the frame strip, play preview, palette/dither controls, and GIF/MP4 export.
+- [`mt_fuji_before.png`](assets/examples/mt_fuji_before.png) · [`mt_fuji_after.png`](assets/examples/mt_fuji_after.png)
+
+### Animated GIFs
+
+![Sample GIF](assets/examples/gif_example.gif)
+
+![Sample GIF 2](assets/examples/gif_example2.gif)
+
+- [`gif_example.gif`](assets/examples/gif_example.gif) · [`gif_example2.gif`](assets/examples/gif_example2.gif)
+
+Upload any of these from the landing page, or use **Upload file** in the editor header after opening another image. Use them to try the frame strip, play preview, palette/dither controls, and GIF/MP4 export.
 
 ## Features
 
 - Upload PNG, JPG, GIF, WEBP, MP4, or WebM — no file size limit (client-side only)
 - Animated GIF and video support with a frame strip to preview individual frames
-- Play animation preview in the browser (cycles source frames; settings apply to the selected frame only)
+- Play animation preview in the browser (pixelated frames prefetched ahead for smooth playback)
 - Dark mode by default with light/dark toggle in the header
-- Header export controls: upload file, format, output size, and download
+- Header export controls: upload file, format, output size, and download (defaults to original size)
 - Export animations as GIF or MP4 with progress bar and cancel support
 - Live pixel size, brightness, contrast, saturation controls
 - Built-in palettes (Pico-8, Lost Century, Game Boy, NES, and more)
@@ -46,7 +60,10 @@ Use it to try the frame strip, play preview, palette/dither controls, and GIF/MP
 index.html
 assets/
   examples/
-    gif_example.gif   Sample GIF for testing animations
+    gif_example.gif       
+    gif_example2.gif
+    mt_fuji_before.png    Example source image
+    mt_fuji_after.png     Example pixel art output
   css/styles.css
   js/
     main.js          Page bootstrap

@@ -29,8 +29,24 @@
           <h1>Pixel Art<br>Generator</h1>
           <p>Drop in an image, GIF, or video. Tune pixels, palettes, and dithering. Export — all locally in your browser.</p>
         </div>
-        <div id="upload-mount"></div>
-        <p class="landing-formats">PNG · JPG · GIF · WEBP · MP4 · WebM</p>
+        <div class="landing-upload">
+          <div id="upload-mount"></div>
+          <p class="landing-formats">PNG · JPG · GIF · WEBP · MP4 · WebM</p>
+        </div>
+        <figure class="landing-showcase" aria-label="Before and after example">
+          <div class="showcase-pair">
+            <div class="showcase-frame">
+              <img src="/assets/examples/mt_fuji_before.png" alt="Original photo of Mount Fuji" width="640" height="480" loading="lazy">
+              <span class="showcase-label">Before</span>
+            </div>
+            <div class="showcase-arrow" aria-hidden="true">→</div>
+            <div class="showcase-frame showcase-frame--pixel">
+              <img src="/assets/examples/mt_fuji_after.png" alt="Pixel art version of Mount Fuji" width="640" height="480" loading="lazy">
+              <span class="showcase-label">After</span>
+            </div>
+          </div>
+          <figcaption class="showcase-caption">Mount Fuji — original photo vs pixel art output</figcaption>
+        </figure>
       </div>
     </section>
     <section id="editor-section" class="editor-section"></section>

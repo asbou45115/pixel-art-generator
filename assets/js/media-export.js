@@ -18,7 +18,7 @@ export function pickExportCanvas(result, exportSize) {
   return out;
 }
 
-export async function encodeGif(results, delays, exportSize = 'pixel', onProgress, signal) {
+export async function encodeGif(results, delays, exportSize = 'source', onProgress, signal) {
   const encoder = GIFEncoder();
   let width = 0;
   let height = 0;
@@ -143,7 +143,7 @@ async function encodeMp4WithRecorder(results, delays, exportSize, onProgress, si
   return new Blob(chunks, { type: ext });
 }
 
-export async function encodeMp4(results, delays, exportSize = 'pixel', onProgress, signal) {
+export async function encodeMp4(results, delays, exportSize = 'source', onProgress, signal) {
   if (!results.length) throw new Error('No frames to export.');
   if (typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined') {
     try {

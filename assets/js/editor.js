@@ -2,6 +2,9 @@ import { getAllPalettes, loadCustomPalettes, saveCustomPalettes } from './palett
 import { pixelateImage, pixelateFrames, resolvePixelateOptions, downloadCanvas } from './pixelate.js';
 import { downloadGif, downloadMp4, pickExportCanvas } from './media-export.js';
 import { initRangeSlider } from './range-input.js';
+import { yieldToMain } from './progress.js';
+
+const PREFETCH_AHEAD = 4;
 
 const DEFAULTS = {
   pixelSize: 8,
@@ -16,7 +19,7 @@ const DEFAULTS = {
   colorDistance: 'rgb',
   showGrid: false,
   exportFormat: 'png',
-  exportSize: 'pixel',
+  exportSize: 'source',
   exportQuality: 0.92,
   outputWidth: 0,
   outputHeight: 0,
@@ -51,6 +54,20 @@ function buildPixelateOptions(state, paletteColors) {
   };
 }
 
+function settingsKey(state) {
+  return JSON.stringify({
+    pixelSize: state.pixelSize,
+    brightness: state.brightness,
+    contrast: state.contrast,
+    saturation: state.saturation,
+    palette: state.palette,
+    dither: state.dither,
+    ditherStrength: state.ditherStrength,
+    paletteSize: state.paletteSize,
+    colorDistance: state.colorDistance,
+  });
+}
+
 export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile, tasks } = {}) {
   const state = { ...DEFAULTS, ...preset };
   const isAnimation = mediaSource.kind === 'animation';
@@ -79,6 +96,10 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   let animAccum = 0;
   let animLastTime = 0;
   let playFrameIndex = 0;
+  let playCache = new Map();
+  let playCacheOptions = null;
+  let playCacheKey = '';
+  let prefetchGen = 0;
 
   const root = document.createElement('div');
   root.className = 'editor-layout';
@@ -211,8 +232,8 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
       <label class="header-field">
         <span class="sr-only">Output size</span>
         <select id="header-export-size" class="header-select">
-          <option value="pixel">Pixel size</option>
           <option value="source">Original size</option>
+          <option value="pixel">Pixel size</option>
           <option value="double">2× size</option>
           <option value="quad">4× size</option>
         </select>
@@ -263,6 +284,13 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     playBtn.setAttribute('aria-label', playing ? 'Pause animation' : 'Play animation');
     playBtn.querySelector('.icon-play')?.classList.toggle('hidden', playing);
     playBtn.querySelector('.icon-pause')?.classList.toggle('hidden', !playing);
+  }
+
+  function clearPlayCache() {
+    playCache.clear();
+    playCacheOptions = null;
+    playCacheKey = '';
+    prefetchGen++;
   }
 
   function stopPlayback({ restore = true } = {}) {
@@ -381,8 +409,8 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     }
   }
 
-  function drawResultFrame(frameResult, frameIndex) {
-    result = frameResult;
+  function drawResultFrame(frameResult, frameIndex, { updateResult = true } = {}) {
+    if (updateResult) result = frameResult;
     previewWidth = frameResult.width;
     previewHeight = frameResult.height;
     canvas.width = frameResult.width;
@@ -394,18 +422,36 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     updateBadges(frameIndex);
   }
 
-  function showSourceFrame(index) {
-    const src = sourceFrames[index];
-    previewWidth = src.width;
-    previewHeight = src.height;
-    canvas.width = src.width;
-    canvas.height = src.height;
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(src, 0, 0);
-    gridCanvas.classList.add('hidden');
-    fitPreviewFromSize(src.width, src.height);
-    updateBadges(index);
+  async function getPlayOptions() {
+    let options = buildPixelateOptions(state, getPaletteColors());
+    if (options.autoPalette) {
+      options = await resolvePixelateOptions(sourceFrames[selectedFrameIndex], options);
+    }
+    return options;
+  }
+
+  async function renderPlayFrame(index, options, gen) {
+    if (playCache.has(index)) return playCache.get(index);
+    const frameResult = await pixelateImage(sourceFrames[index], options);
+    if (gen !== prefetchGen) return null;
+    playCache.set(index, frameResult);
+    return frameResult;
+  }
+
+  async function runPrefetch(gen) {
+    while (isPlaying && gen === prefetchGen && playCacheOptions) {
+      let queued = false;
+      for (let offset = 0; offset <= PREFETCH_AHEAD; offset++) {
+        const idx = (playFrameIndex + offset) % sourceFrames.length;
+        if (playCache.has(idx)) continue;
+        await renderPlayFrame(idx, playCacheOptions, gen);
+        if (!isPlaying || gen !== prefetchGen) return;
+        queued = true;
+        await yieldToMain();
+        break;
+      }
+      if (!queued) await new Promise((r) => setTimeout(r, 16));
+    }
   }
 
   function fitPreviewFromSize(width, height) {
@@ -472,6 +518,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
 
   function scheduleRender() {
     if (isPlaying) stopPlayback({ restore: false });
+    clearPlayCache();
     clearTimeout(renderTimer);
     renderTimer = setTimeout(render, isAnimation ? 150 : 80);
   }
@@ -498,15 +545,38 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     startPlayback();
   }
 
-  function startPlayback() {
-    if (!sourceFrames.length) return;
+  async function startPlayback() {
+    if (!sourceFrames.length || isPlaying) return;
+
+    if (playBtn) playBtn.disabled = true;
+    clearPlayCache();
+    playCacheKey = settingsKey(state);
+    playCacheOptions = await getPlayOptions();
+
+    const gen = prefetchGen;
+    const warmup = Math.min(PREFETCH_AHEAD + 1, sourceFrames.length);
+    for (let i = 0; i < warmup; i++) {
+      const idx = (selectedFrameIndex + i) % sourceFrames.length;
+      const rendered = await renderPlayFrame(idx, playCacheOptions, gen);
+      if (gen !== prefetchGen) {
+        if (playBtn) playBtn.disabled = false;
+        return;
+      }
+      if (!rendered) {
+        if (playBtn) playBtn.disabled = false;
+        return;
+      }
+    }
+
     isPlaying = true;
     setPlayButtonState(true);
+    if (playBtn) playBtn.disabled = false;
     playFrameIndex = selectedFrameIndex;
     animLastTime = performance.now();
     animAccum = 0;
-    showSourceFrame(playFrameIndex);
+    drawResultFrame(playCache.get(playFrameIndex), playFrameIndex);
     updateFrameStripActive();
+    runPrefetch(gen);
 
     const tick = (now) => {
       if (!isPlaying) return;
@@ -514,11 +584,15 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
       animAccum += now - animLastTime;
       animLastTime = now;
       if (animAccum >= delay) {
-        animAccum = 0;
-        playFrameIndex = (playFrameIndex + 1) % sourceFrames.length;
-        selectedFrameIndex = playFrameIndex;
-        showSourceFrame(playFrameIndex);
-        updateFrameStripActive();
+        const nextIndex = (playFrameIndex + 1) % sourceFrames.length;
+        const cached = playCache.get(nextIndex);
+        if (cached) {
+          animAccum = 0;
+          playFrameIndex = nextIndex;
+          selectedFrameIndex = playFrameIndex;
+          drawResultFrame(cached, playFrameIndex);
+          updateFrameStripActive();
+        }
       }
       animRaf = requestAnimationFrame(tick);
     };
@@ -702,6 +776,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
       if (animRaf) cancelAnimationFrame(animRaf);
       animRaf = null;
     }
+    clearPlayCache();
     resizeObserver.disconnect();
     if (headerBar) headerBar.innerHTML = '';
   };
