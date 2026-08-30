@@ -36,7 +36,7 @@ Upload any of these from the landing page, or use **Upload file** in the editor 
 
 ## Features
 
-- Upload PNG, JPG, GIF, WEBP, MP4, or WebM — no file size limit (client-side only)
+- Upload PNG, JPG, GIF, WEBP, MP4, or WebM — no file size limit; still images process at full resolution (client-side only)
 - Animated GIF and video support with a frame strip to preview individual frames
 - Play animation preview in the browser (pixelated frames prefetched ahead for smooth playback)
 - Dark mode by default with light/dark toggle in the header
@@ -69,9 +69,16 @@ Edges are detected on the downscaled image (before quantization) for cleaner lin
 
 ## Limits
 
-- GIFs and videos are sampled to 150 frames and 15 seconds of video for performance
-- Animated GIF decoding requires a browser with `ImageDecoder` support (Chrome, Edge, Firefox)
+The app does not artificially cap frame count, video duration, or image dimensions. Practical limits come from your browser and device:
+
+- Animated GIF decoding requires `ImageDecoder` (Chrome, Edge, Firefox)
+- Full-frame video capture requires `requestVideoFrameCallback` (Chrome, Edge, Firefox, Safari 15.4+)
 - MP4 export uses WebCodecs when available, otherwise falls back to the browser's native recorder
+- GIFs and videos open quickly; frames are decoded on demand instead of buffered in memory
+- Videos index in the background (frame timing only) while you edit; playback is available once indexing finishes
+- Export processes one frame at a time (capture → pixelate → encode) so peak memory stays low
+- Background video indexing runs at playback speed; export of long videos also replays the source at least once
+- Very large single frames (high-resolution stills) still use significant RAM during processing
 
 ## Project structure
 

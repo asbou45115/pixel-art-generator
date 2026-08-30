@@ -1,6 +1,6 @@
 import { getAllPalettes, loadCustomPalettes, saveCustomPalettes } from './palettes.js';
-import { pixelateImage, pixelateFrames, resolvePixelateOptions, downloadCanvas } from './pixelate.js';
-import { downloadGif, downloadMp4, pickExportCanvas } from './media-export.js';
+import { pixelateImage, resolvePixelateOptions, downloadCanvas } from './pixelate.js';
+import { downloadAnimationStream, pickExportCanvas } from './media-export.js';
 import { initRangeSlider } from './range-input.js';
 import { yieldToMain } from './progress.js';
 
@@ -88,10 +88,14 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   }
   if (isAnimation) state.exportFormat = 'gif';
 
+  const animation = isAnimation ? mediaSource.animation : null;
   let sourceImage = null;
-  let sourceFrames = isAnimation ? mediaSource.frames.map((f) => f.canvas) : [];
-  let frameDelays = isAnimation ? mediaSource.frames.map((f) => f.delay) : [];
+  let frameCount = isAnimation ? animation.getFrameCount() : 0;
   let selectedFrameIndex = 0;
+  let sourceFrameCache = new Map();
+  let thumbCache = new Map();
+  let indexController = null;
+  let indexGeneration = 0;
   let result = null;
   let renderTimer = null;
   let renderGeneration = 0;
@@ -213,6 +217,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
           <span class="badge" id="size-badge">—</span>
           <span class="badge" id="pixel-badge">—</span>
           <span class="badge hidden" id="frame-badge">—</span>
+          <span class="badge hidden" id="index-badge">—</span>
         </div>
       </div>
       <div class="preview-container" id="preview-container">
@@ -240,6 +245,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   const previewContainer = root.querySelector('#preview-container');
   const paletteSelect = root.querySelector('#palette');
   const frameBadge = root.querySelector('#frame-badge');
+  const indexBadge = root.querySelector('#index-badge');
   const frameStrip = root.querySelector('#frame-strip');
   const frameControls = root.querySelector('#frame-controls');
   const frameStripScroll = root.querySelector('#frame-strip-scroll');
@@ -365,11 +371,86 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     }
   }
 
+  function clearSourceFrameCache() {
+    sourceFrameCache.clear();
+    thumbCache.clear();
+  }
+
+  function updateIndexBadge(message) {
+    if (!indexBadge) return;
+    if (!message) {
+      indexBadge.classList.add('hidden');
+      indexBadge.textContent = '';
+      return;
+    }
+    indexBadge.classList.remove('hidden');
+    indexBadge.textContent = message;
+  }
+
+  function onAnimationIndexed() {
+    frameCount = animation.getFrameCount();
+    buildFrameStrip();
+    updateIndexBadge(null);
+    if (playBtn) playBtn.disabled = isBusy;
+  }
+
+  function startBackgroundIndexing() {
+    if (!animation || animation.isIndexed?.()) return;
+
+    const gen = ++indexGeneration;
+    indexController = new AbortController();
+    animation.startIndexing((msg, done, total) => {
+      if (gen !== indexGeneration) return;
+      const pct = done && total ? Math.round((done / total) * 100) : null;
+      updateIndexBadge(pct != null ? `Indexing ${pct}%` : msg);
+    }, indexController.signal).then(() => {
+      if (gen !== indexGeneration) return;
+      onAnimationIndexed();
+    }).catch((err) => {
+      if (gen !== indexGeneration || err?.name === 'AbortError') return;
+      updateIndexBadge('Indexing failed');
+    });
+  }
+
+  async function getSourceFrame(index) {
+    if (sourceFrameCache.has(index)) return sourceFrameCache.get(index);
+    const canvas = await animation.getSourceFrame(index);
+    sourceFrameCache.set(index, canvas);
+    if (sourceFrameCache.size > 8) {
+      const oldest = sourceFrameCache.keys().next().value;
+      sourceFrameCache.delete(oldest);
+    }
+    return canvas;
+  }
+
+  async function getFrameDelay(index) {
+    return animation.getDelay(index);
+  }
+
+  function getFrameCount() {
+    return animation?.getFrameCount() || frameCount || 0;
+  }
+
   function getPaletteColors() {
     if (state.autoPalette || state.palette === 'from-image') return null;
     const all = getAllPalettes();
     const p = all.find((x) => x.id === state.palette);
     return p?.colors || null;
+  }
+
+  async function updateFrameThumb(i) {
+    const btn = frameStripScroll.querySelector(`[data-frame-index="${i}"]`);
+    if (!btn || thumbCache.has(i)) return;
+    const srcCanvas = await getSourceFrame(i);
+    const thumbCanvas = btn.querySelector('canvas');
+    if (!thumbCanvas) return;
+    const scale = THUMB_HEIGHT / srcCanvas.height;
+    thumbCanvas.width = Math.max(1, Math.round(srcCanvas.width * scale));
+    thumbCanvas.height = THUMB_HEIGHT;
+    const tctx = thumbCanvas.getContext('2d');
+    tctx.imageSmoothingEnabled = false;
+    tctx.drawImage(srcCanvas, 0, 0, thumbCanvas.width, thumbCanvas.height);
+    thumbCache.set(i, true);
   }
 
   function buildFrameStrip() {
@@ -382,20 +463,18 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     frameControls.classList.remove('hidden');
     frameStripScroll.innerHTML = '';
 
-    sourceFrames.forEach((srcCanvas, i) => {
+    const count = getFrameCount();
+    for (let i = 0; i < count; i++) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = `frame-thumb${i === selectedFrameIndex ? ' active' : ''}`;
       btn.title = `Frame ${i + 1}`;
       btn.setAttribute('aria-label', `Frame ${i + 1}`);
+      btn.dataset.frameIndex = String(i);
 
       const thumbCanvas = document.createElement('canvas');
-      const scale = THUMB_HEIGHT / srcCanvas.height;
-      thumbCanvas.width = Math.max(1, Math.round(srcCanvas.width * scale));
+      thumbCanvas.width = Math.max(1, Math.round((mediaSource.width / mediaSource.height) * THUMB_HEIGHT));
       thumbCanvas.height = THUMB_HEIGHT;
-      const tctx = thumbCanvas.getContext('2d');
-      tctx.imageSmoothingEnabled = false;
-      tctx.drawImage(srcCanvas, 0, 0, thumbCanvas.width, thumbCanvas.height);
 
       const label = document.createElement('span');
       label.className = 'frame-thumb-num';
@@ -410,7 +489,8 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
         scheduleRender();
       });
       frameStripScroll.appendChild(btn);
-    });
+      updateFrameThumb(i);
+    }
   }
 
   function updateFrameStripActive() {
@@ -430,7 +510,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
       : `Block: ${state.pixelSize}px`;
     if (isAnimation) {
       frameBadge.classList.remove('hidden');
-      frameBadge.textContent = `Frame ${frameIndex + 1}/${sourceFrames.length}`;
+      frameBadge.textContent = `Frame ${frameIndex + 1}/${getFrameCount()}`;
       root.querySelector('#pixel-badge').textContent = `${mediaSource.label} · ${blockLabel}`;
     } else {
       frameBadge.classList.add('hidden');
@@ -454,24 +534,27 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   async function getPlayOptions() {
     let options = buildPixelateOptions(state, getPaletteColors());
     if (options.autoPalette) {
-      options = await resolvePixelateOptions(sourceFrames[selectedFrameIndex], options);
+      const source = await getSourceFrame(selectedFrameIndex);
+      options = await resolvePixelateOptions(source, options);
     }
     return options;
   }
 
   async function renderPlayFrame(index, options, gen) {
     if (playCache.has(index)) return playCache.get(index);
-    const frameResult = await pixelateImage(sourceFrames[index], options);
+    const source = await getSourceFrame(index);
+    const frameResult = await pixelateImage(source, options);
     if (gen !== prefetchGen) return null;
     playCache.set(index, frameResult);
     return frameResult;
   }
 
   async function runPrefetch(gen) {
+    const total = getFrameCount();
     while (isPlaying && gen === prefetchGen && playCacheOptions) {
       let queued = false;
       for (let offset = 0; offset <= PREFETCH_AHEAD; offset++) {
-        const idx = (playFrameIndex + offset) % sourceFrames.length;
+        const idx = (playFrameIndex + offset) % total;
         if (playCache.has(idx)) continue;
         await renderPlayFrame(idx, playCacheOptions, gen);
         if (!isPlaying || gen !== prefetchGen) return;
@@ -548,6 +631,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   function scheduleRender() {
     if (isPlaying) stopPlayback({ restore: false });
     clearPlayCache();
+    clearSourceFrameCache();
     clearTimeout(renderTimer);
     renderTimer = setTimeout(render, isAnimation ? 150 : 80);
   }
@@ -559,10 +643,11 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
 
   async function renderPreviewFrame() {
     const options = buildPixelateOptions(state, getPaletteColors());
-    const source = isAnimation ? sourceFrames[selectedFrameIndex] : sourceImage;
+    const source = isAnimation ? await getSourceFrame(selectedFrameIndex) : sourceImage;
     result = await pixelateImage(source, options);
     drawResultFrame(result, selectedFrameIndex);
     updateFrameStripActive();
+    if (isAnimation) updateFrameThumb(selectedFrameIndex);
   }
 
   function togglePlayback() {
@@ -575,7 +660,9 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   }
 
   async function startPlayback() {
-    if (!sourceFrames.length || isPlaying) return;
+    const total = getFrameCount();
+    if (!total || isPlaying) return;
+    if (animation && !animation.isIndexed?.()) return;
 
     if (playBtn) playBtn.disabled = true;
     clearPlayCache();
@@ -583,9 +670,9 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     playCacheOptions = await getPlayOptions();
 
     const gen = prefetchGen;
-    const warmup = Math.min(PREFETCH_AHEAD + 1, sourceFrames.length);
+    const warmup = Math.min(PREFETCH_AHEAD + 1, total);
     for (let i = 0; i < warmup; i++) {
-      const idx = (selectedFrameIndex + i) % sourceFrames.length;
+      const idx = (selectedFrameIndex + i) % total;
       const rendered = await renderPlayFrame(idx, playCacheOptions, gen);
       if (gen !== prefetchGen) {
         if (playBtn) playBtn.disabled = false;
@@ -607,13 +694,13 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     updateFrameStripActive();
     runPrefetch(gen);
 
-    const tick = (now) => {
+    const tick = async (now) => {
       if (!isPlaying) return;
-      const delay = frameDelays[playFrameIndex] || 100;
+      const delay = await getFrameDelay(playFrameIndex);
       animAccum += now - animLastTime;
       animLastTime = now;
       if (animAccum >= delay) {
-        const nextIndex = (playFrameIndex + 1) % sourceFrames.length;
+        const nextIndex = (playFrameIndex + 1) % total;
         const cached = playCache.get(nextIndex);
         if (cached) {
           animAccum = 0;
@@ -628,18 +715,36 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     animRaf = requestAnimationFrame(tick);
   }
 
-  async function renderAllFrames(signal, update) {
+  async function exportAnimation(signal, update) {
     let options = buildPixelateOptions(state, getPaletteColors());
-    if (options.autoPalette) {
-      options = await resolvePixelateOptions(sourceFrames[selectedFrameIndex], options);
+    let paletteResolved = !options.autoPalette;
+    const wasIndexed = animation.isIndexed?.();
+
+    await downloadAnimationStream(
+      animation,
+      state.exportFormat,
+      async (sourceCanvas, index) => {
+        if (!paletteResolved) {
+          options = await resolvePixelateOptions(sourceCanvas, options);
+          paletteResolved = true;
+        }
+        return pixelateImage(sourceCanvas, options);
+      },
+      state.exportSize,
+      (done, total) => {
+        const count = total || done;
+        update(`Exporting frame ${done}/${count}…`, Math.round((done / count) * 100));
+      },
+      signal,
+    );
+
+    if (!wasIndexed && animation.isIndexed?.()) {
+      onAnimationIndexed();
     }
-    return pixelateFrames(sourceFrames, options, (done, total) => {
-      update(`Rendering frame ${done}/${total}…`, Math.round((done / total) * 100));
-    }, signal);
   }
 
   async function render() {
-    if (isAnimation ? !sourceFrames.length : !sourceImage) return;
+    if (isAnimation ? !animation : !sourceImage) return;
     const generation = ++renderGeneration;
     setLocalProcessing(true, isAnimation ? 'Updating preview…' : 'Processing…');
 
@@ -660,18 +765,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     try {
       if (isAnimation && (state.exportFormat === 'gif' || state.exportFormat === 'mp4')) {
         const exportResult = await tasks.run(async (signal, update) => {
-          const allFrames = await renderAllFrames(signal, update);
-          if (state.exportFormat === 'gif') {
-            update('Encoding GIF…', 95);
-            await downloadGif(allFrames, frameDelays, state.exportSize, (done, total) => {
-              update(`Encoding GIF ${done}/${total}…`, 95 + Math.round((done / total) * 5));
-            }, signal);
-          } else {
-            update('Encoding MP4…', 95);
-            await downloadMp4(allFrames, frameDelays, state.exportSize, (done, total) => {
-              update(`Encoding video ${done}/${total}…`, 95 + Math.round((done / total) * 5));
-            }, signal);
-          }
+          await exportAnimation(signal, update);
           return true;
         }, { label: 'Preparing export…', cancellable: true, progress: true });
 
@@ -820,13 +914,21 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
       if (animRaf) cancelAnimationFrame(animRaf);
       animRaf = null;
     }
+    indexGeneration++;
+    indexController?.abort();
+    indexController = null;
+    animation?.cancelIndexing?.();
     clearPlayCache();
+    clearSourceFrameCache();
     resizeObserver.disconnect();
     if (headerBar) headerBar.innerHTML = '';
   };
 
   if (isAnimation) {
+    buildFrameStrip();
+    if (playBtn && animation && !animation.isIndexed?.()) playBtn.disabled = true;
     render();
+    startBackgroundIndexing();
   } else {
     const img = new Image();
     img.onload = () => { sourceImage = img; render(); };

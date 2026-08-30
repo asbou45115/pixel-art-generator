@@ -1,7 +1,5 @@
 import { hexToRgb, rgbToHex } from './palettes.js';
 
-const MAX_EDGE = 2200;
-
 export function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
@@ -17,20 +15,6 @@ function loadImage(src) {
     img.onerror = reject;
     img.src = src;
   });
-}
-
-function resizeImage(img, maxEdge) {
-  const w = img.naturalWidth || img.width;
-  const h = img.naturalHeight || img.height;
-  const scale = Math.min(1, maxEdge / Math.max(w, h));
-  if (scale >= 1) return img;
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.round(w * scale);
-  canvas.height = Math.round(h * scale);
-  const ctx = canvas.getContext('2d');
-  ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-  return canvas;
 }
 
 function buildFilterString(brightness, contrast, saturation) {
@@ -502,9 +486,8 @@ export async function pixelateImage(source, options = {}) {
   const edgeOpts = { edges, edgeThreshold, edgeThickness };
 
   const img = typeof source === 'string' ? await loadImage(source) : source;
-  const resized = resizeImage(img, MAX_EDGE);
-  const sourceW = resized.width || resized.naturalWidth;
-  const sourceH = resized.height || resized.naturalHeight;
+  const sourceW = img.width || img.naturalWidth;
+  const sourceH = img.height || img.naturalHeight;
 
   let pixelCanvas;
   let previewCanvas;
@@ -512,7 +495,7 @@ export async function pixelateImage(source, options = {}) {
   let pixelH;
 
   if (outputWidth > 0 && outputHeight > 0) {
-    pixelCanvas = fitToCanvas(resized, outputWidth, outputHeight, outputFit === 'contain' ? 'contain' : 'cover', filterString);
+    pixelCanvas = fitToCanvas(img, outputWidth, outputHeight, outputFit === 'contain' ? 'contain' : 'cover', filterString);
     pixelW = pixelCanvas.width;
     pixelH = pixelCanvas.height;
     previewCanvas = pixelCanvas;
@@ -520,13 +503,13 @@ export async function pixelateImage(source, options = {}) {
     pixelW = Math.max(1, Math.floor(sourceW / pixelSize));
     pixelH = Math.max(1, Math.floor(sourceH / pixelSize));
     // Smooth downscale first (averages colors per block), then quantize at pixel resolution
-    pixelCanvas = downscaleSmooth(resized, sourceW, sourceH, pixelW, pixelH, filterString);
+    pixelCanvas = downscaleSmooth(img, sourceW, sourceH, pixelW, pixelH, filterString);
     previewCanvas = upscaleNearest(pixelCanvas, pixelW, pixelH, sourceW, sourceH);
   } else {
     pixelCanvas = createCanvas(sourceW, sourceH);
     const ctx = pixelCanvas.getContext('2d');
     ctx.filter = filterString;
-    ctx.drawImage(resized, 0, 0);
+    ctx.drawImage(img, 0, 0);
     ctx.filter = 'none';
     pixelW = sourceW;
     pixelH = sourceH;
@@ -584,27 +567,26 @@ async function prepareSourceFrame(source, options) {
 
   const filterString = buildFilterString(brightness, contrast, saturation);
   const img = typeof source === 'string' ? await loadImage(source) : source;
-  const resized = resizeImage(img, MAX_EDGE);
-  const sourceW = resized.width || resized.naturalWidth;
-  const sourceH = resized.height || resized.naturalHeight;
+  const sourceW = img.width || img.naturalWidth;
+  const sourceH = img.height || img.naturalHeight;
 
   let pixelCanvas;
   let pixelW;
   let pixelH;
 
   if (outputWidth > 0 && outputHeight > 0) {
-    pixelCanvas = fitToCanvas(resized, outputWidth, outputHeight, outputFit === 'contain' ? 'contain' : 'cover', filterString);
+    pixelCanvas = fitToCanvas(img, outputWidth, outputHeight, outputFit === 'contain' ? 'contain' : 'cover', filterString);
     pixelW = pixelCanvas.width;
     pixelH = pixelCanvas.height;
   } else if (pixelSize > 1) {
     pixelW = Math.max(1, Math.floor(sourceW / pixelSize));
     pixelH = Math.max(1, Math.floor(sourceH / pixelSize));
-    pixelCanvas = downscaleSmooth(resized, sourceW, sourceH, pixelW, pixelH, filterString);
+    pixelCanvas = downscaleSmooth(img, sourceW, sourceH, pixelW, pixelH, filterString);
   } else {
     pixelCanvas = createCanvas(sourceW, sourceH);
     const ctx = pixelCanvas.getContext('2d');
     ctx.filter = filterString;
-    ctx.drawImage(resized, 0, 0);
+    ctx.drawImage(img, 0, 0);
     ctx.filter = 'none';
     pixelW = sourceW;
     pixelH = sourceH;
