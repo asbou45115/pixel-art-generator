@@ -1,5 +1,6 @@
 import { getAllPalettes, loadCustomPalettes, saveCustomPalettes } from './palettes.js';
-import { pixelateImage, scaleCanvas, downloadCanvas } from './pixelate.js';
+import { pixelateImage, pixelateFrames, scaleCanvas, downloadCanvas } from './pixelate.js';
+import { downloadGif, downloadWebM } from './media-export.js';
 
 const DEFAULTS = {
   pixelSize: 8,
@@ -28,18 +29,49 @@ function computeDisplayScale(availW, availH, width, height) {
   return fit;
 }
 
-export function createEditor(imageSrc, preset = {}) {
+function buildPixelateOptions(state, paletteColors) {
+  const usePalette = state.autoPalette || (paletteColors && state.palette !== 'none');
+  return {
+    pixelSize: state.pixelSize,
+    brightness: state.brightness,
+    contrast: state.contrast,
+    saturation: state.saturation,
+    paletteColors: usePalette ? paletteColors : null,
+    dither: usePalette ? state.dither : 'none',
+    ditherStrength: state.ditherStrength,
+    autoPalette: state.autoPalette,
+    paletteSize: state.paletteSize,
+    colorDistance: state.colorDistance,
+    outputWidth: state.outputWidth,
+    outputHeight: state.outputHeight,
+    outputFit: state.outputFit,
+  };
+}
+
+export function createEditor(mediaSource, preset = {}) {
   const state = { ...DEFAULTS, ...preset };
+  const isAnimation = mediaSource.kind === 'animation';
   if (preset.autoPalette || state.palette === 'from-image') {
     state.palette = 'from-image';
     state.autoPalette = true;
   } else {
     state.autoPalette = false;
   }
+  if (isAnimation) state.exportFormat = 'gif';
+
   let sourceImage = null;
+  let sourceFrames = isAnimation ? mediaSource.frames.map((f) => f.canvas) : [];
+  let frameDelays = isAnimation ? mediaSource.frames.map((f) => f.delay) : [];
   let result = null;
+  let processedFrames = [];
   let renderTimer = null;
+  let renderGeneration = 0;
   let displayScale = 1;
+  let previewFrameIndex = 0;
+  let animRaf = null;
+  let animLastTime = 0;
+  let animAccum = 0;
+  let isExporting = false;
 
   const root = document.createElement('div');
   root.className = 'editor-layout';
@@ -123,6 +155,7 @@ export function createEditor(imageSrc, preset = {}) {
         <div class="preview-badges">
           <span class="badge" id="size-badge">—</span>
           <span class="badge" id="pixel-badge">—</span>
+          <span class="badge hidden" id="frame-badge">—</span>
         </div>
       </div>
       <div class="preview-container" id="preview-container">
@@ -135,11 +168,7 @@ export function createEditor(imageSrc, preset = {}) {
       <div class="export-bar">
         <div class="control-group">
           <label for="exportFormat">Format</label>
-          <select id="exportFormat">
-            <option value="png">PNG</option>
-            <option value="jpeg">JPEG</option>
-            <option value="webp">WebP</option>
-          </select>
+          <select id="exportFormat"></select>
         </div>
         <div class="control-group">
           <label for="exportSize">Output size</label>
@@ -160,6 +189,25 @@ export function createEditor(imageSrc, preset = {}) {
   const processing = root.querySelector('#processing');
   const previewContainer = root.querySelector('#preview-container');
   const paletteSelect = root.querySelector('#palette');
+  const exportFormatSelect = root.querySelector('#exportFormat');
+  const downloadBtn = root.querySelector('#download-btn');
+  const frameBadge = root.querySelector('#frame-badge');
+
+  function populateExportFormats() {
+    if (isAnimation) {
+      exportFormatSelect.innerHTML = `
+        <option value="gif">GIF</option>
+        <option value="webm">WebM video</option>
+        <option value="png">PNG (first frame)</option>`;
+      exportFormatSelect.value = ['gif', 'webm', 'png'].includes(state.exportFormat) ? state.exportFormat : 'gif';
+    } else {
+      exportFormatSelect.innerHTML = `
+        <option value="png">PNG</option>
+        <option value="jpeg">JPEG</option>
+        <option value="webp">WebP</option>`;
+      exportFormatSelect.value = state.exportFormat;
+    }
+  }
 
   function populatePalettes() {
     const curated = getAllPalettes()
@@ -199,6 +247,61 @@ export function createEditor(imageSrc, preset = {}) {
     const all = getAllPalettes();
     const p = all.find((x) => x.id === state.palette);
     return p?.colors || null;
+  }
+
+  function stopPreviewLoop() {
+    if (animRaf) cancelAnimationFrame(animRaf);
+    animRaf = null;
+    animAccum = 0;
+  }
+
+  function startPreviewLoop() {
+    stopPreviewLoop();
+    if (!isAnimation || !processedFrames.length) return;
+
+    const drawFrame = (index) => {
+      const frame = processedFrames[index];
+      if (!frame) return;
+      canvas.width = frame.width;
+      canvas.height = frame.height;
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(frame.canvas, 0, 0);
+      result = frame;
+      fitPreview();
+      updateBadges(index);
+    };
+
+    previewFrameIndex = 0;
+    drawFrame(0);
+    animLastTime = performance.now();
+
+    const tick = (now) => {
+      const delay = processedFrames[previewFrameIndex]?.delay || 100;
+      animAccum += now - animLastTime;
+      animLastTime = now;
+      if (animAccum >= delay) {
+        animAccum = 0;
+        previewFrameIndex = (previewFrameIndex + 1) % processedFrames.length;
+        drawFrame(previewFrameIndex);
+      }
+      animRaf = requestAnimationFrame(tick);
+    };
+    animRaf = requestAnimationFrame(tick);
+  }
+
+  function updateBadges(frameIndex = 0) {
+    if (!result) return;
+    root.querySelector('#size-badge').textContent = `${result.pixelWidth} × ${result.pixelHeight} px`;
+    const blockLabel = `Block: ${state.pixelSize}px · Preview ${result.width}×${result.height}`;
+    if (isAnimation) {
+      frameBadge.classList.remove('hidden');
+      frameBadge.textContent = `Frame ${frameIndex + 1}/${processedFrames.length}`;
+      root.querySelector('#pixel-badge').textContent = `${mediaSource.label} · ${blockLabel}`;
+    } else {
+      frameBadge.classList.add('hidden');
+      root.querySelector('#pixel-badge').textContent = blockLabel;
+    }
   }
 
   function fitPreview() {
@@ -259,46 +362,55 @@ export function createEditor(imageSrc, preset = {}) {
 
   function drawToCanvas() {
     if (!result) return;
+    stopPreviewLoop();
     canvas.width = result.width;
     canvas.height = result.height;
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(result.canvas, 0, 0);
     fitPreview();
-    root.querySelector('#size-badge').textContent = `${result.pixelWidth} × ${result.pixelHeight} px`;
-    root.querySelector('#pixel-badge').textContent = `Block: ${state.pixelSize}px · Preview ${result.width}×${result.height}`;
+    updateBadges();
   }
 
   function scheduleRender() {
     clearTimeout(renderTimer);
-    renderTimer = setTimeout(render, 80);
+    renderTimer = setTimeout(render, isAnimation ? 200 : 80);
+  }
+
+  function setProcessing(active, message = 'Processing…') {
+    processing.textContent = message;
+    processing.classList.toggle('hidden', !active);
+    downloadBtn.disabled = active;
   }
 
   async function render() {
-    if (!sourceImage) return;
-    processing.classList.remove('hidden');
+    if (isAnimation ? !sourceFrames.length : !sourceImage) return;
+    const generation = ++renderGeneration;
+    setProcessing(true, isAnimation ? 'Processing frames…' : 'Processing…');
+    stopPreviewLoop();
+
     try {
-      const paletteColors = getPaletteColors();
-      const usePalette = state.autoPalette || (paletteColors && state.palette !== 'none');
-      const dither = usePalette ? state.dither : 'none';
-      result = await pixelateImage(sourceImage, {
-        pixelSize: state.pixelSize,
-        brightness: state.brightness,
-        contrast: state.contrast,
-        saturation: state.saturation,
-        paletteColors: usePalette ? paletteColors : null,
-        dither,
-        ditherStrength: state.ditherStrength,
-        autoPalette: state.autoPalette,
-        paletteSize: state.paletteSize,
-        colorDistance: state.colorDistance,
-        outputWidth: state.outputWidth,
-        outputHeight: state.outputHeight,
-        outputFit: state.outputFit,
-      });
-      drawToCanvas();
+      const options = buildPixelateOptions(state, getPaletteColors());
+
+      if (isAnimation) {
+        const results = await pixelateFrames(sourceFrames, options, (done, total) => {
+          if (generation !== renderGeneration) return;
+          setProcessing(true, `Processing frame ${done}/${total}…`);
+        });
+        if (generation !== renderGeneration) return;
+        processedFrames = results.map((r, i) => ({
+          ...r,
+          delay: frameDelays[i] || 100,
+        }));
+        result = processedFrames[0];
+        startPreviewLoop();
+      } else {
+        result = await pixelateImage(sourceImage, options);
+        processedFrames = [];
+        drawToCanvas();
+      }
     } finally {
-      processing.classList.add('hidden');
+      if (generation === renderGeneration) setProcessing(false);
     }
   }
 
@@ -337,7 +449,7 @@ export function createEditor(imageSrc, preset = {}) {
     state.showGrid = e.target.checked;
     fitPreview();
   });
-  root.querySelector('#exportFormat').addEventListener('change', (e) => {
+  exportFormatSelect.addEventListener('change', (e) => {
     state.exportFormat = e.target.value;
   });
   root.querySelector('#exportSize').addEventListener('change', (e) => {
@@ -346,6 +458,7 @@ export function createEditor(imageSrc, preset = {}) {
 
   root.querySelector('#reset-all').addEventListener('click', () => {
     Object.assign(state, DEFAULTS, preset);
+    if (isAnimation) state.exportFormat = 'gif';
     if (preset.autoPalette) {
       state.palette = 'from-image';
       state.autoPalette = true;
@@ -360,8 +473,8 @@ export function createEditor(imageSrc, preset = {}) {
     });
     root.querySelector('#ditherMethod').value = state.dither;
     root.querySelector('#colorDistance').value = state.colorDistance;
-    root.querySelector('#exportFormat').value = state.exportFormat;
     root.querySelector('#exportSize').value = state.exportSize;
+    populateExportFormats();
     updateDitherStrengthVisibility();
     root.querySelector('#showGrid').checked = state.showGrid;
     paletteSelect.value = state.palette;
@@ -369,14 +482,42 @@ export function createEditor(imageSrc, preset = {}) {
     scheduleRender();
   });
 
-  root.querySelector('#download-btn').addEventListener('click', () => {
-    if (!result) return;
-    let out = result.pixelCanvas || result.canvas;
-    if (state.exportSize === 'source') out = result.canvas;
-    else if (state.exportSize === 'double') out = scaleCanvas(result.canvas, result.width * 2, result.height * 2);
-    else if (state.exportSize === 'quad') out = scaleCanvas(result.canvas, result.width * 4, result.height * 4);
-    const ext = state.exportFormat === 'jpeg' ? 'jpg' : state.exportFormat;
-    downloadCanvas(out, `pixel-art.${ext}`, state.exportFormat, state.exportQuality);
+  downloadBtn.addEventListener('click', async () => {
+    if (!result || isExporting) return;
+    isExporting = true;
+    stopPreviewLoop();
+    setProcessing(true, 'Preparing export…');
+
+    try {
+      if (isAnimation && processedFrames.length) {
+        if (state.exportFormat === 'gif') {
+          downloadGif(processedFrames, frameDelays, state.exportSize);
+        } else if (state.exportFormat === 'webm') {
+          await downloadWebM(processedFrames, frameDelays, state.exportSize, (done, total) => {
+            setProcessing(true, `Encoding video ${done}/${total}…`);
+          });
+        } else {
+          const first = processedFrames[0];
+          let out = first.pixelCanvas || first.canvas;
+          if (state.exportSize === 'source') out = first.canvas;
+          else if (state.exportSize === 'double') out = scaleCanvas(first.canvas, first.width * 2, first.height * 2);
+          else if (state.exportSize === 'quad') out = scaleCanvas(first.canvas, first.width * 4, first.height * 4);
+          downloadCanvas(out, 'pixel-art.png', 'png', state.exportQuality);
+        }
+        startPreviewLoop();
+        return;
+      }
+
+      let out = result.pixelCanvas || result.canvas;
+      if (state.exportSize === 'source') out = result.canvas;
+      else if (state.exportSize === 'double') out = scaleCanvas(result.canvas, result.width * 2, result.height * 2);
+      else if (state.exportSize === 'quad') out = scaleCanvas(result.canvas, result.width * 4, result.height * 4);
+      const ext = state.exportFormat === 'jpeg' ? 'jpg' : state.exportFormat;
+      downloadCanvas(out, `pixel-art.${ext}`, state.exportFormat, state.exportQuality);
+    } finally {
+      isExporting = false;
+      setProcessing(false);
+    }
   });
 
   root.querySelector('#import-lospec').addEventListener('click', async () => {
@@ -404,6 +545,7 @@ export function createEditor(imageSrc, preset = {}) {
   });
 
   populatePalettes();
+  populateExportFormats();
 
   if (preset.dither) {
     const method = typeof preset.dither === 'string' ? preset.dither : 'floyd-steinberg';
@@ -412,7 +554,6 @@ export function createEditor(imageSrc, preset = {}) {
   }
   if (preset.palette && preset.palette !== 'from-image') paletteSelect.value = preset.palette;
   root.querySelector('#colorDistance').value = state.colorDistance;
-  root.querySelector('#exportFormat').value = state.exportFormat;
   root.querySelector('#exportSize').value = state.exportSize;
   updateDitherStrengthVisibility();
 
@@ -420,15 +561,26 @@ export function createEditor(imageSrc, preset = {}) {
   resizeObserver.observe(previewContainer);
   window.addEventListener('resize', fitPreview);
 
-  const img = new Image();
-  img.onload = () => { sourceImage = img; render(); };
-  img.src = imageSrc;
+  root._cleanup = () => {
+    stopPreviewLoop();
+    resizeObserver.disconnect();
+  };
+
+  if (isAnimation) {
+    render();
+  } else {
+    const img = new Image();
+    img.onload = () => { sourceImage = img; render(); };
+    img.src = mediaSource.url;
+  }
 
   return root;
 }
 
-export function mountEditor(container, imageSrc, preset) {
+export function mountEditor(container, mediaSource, preset) {
   container.innerHTML = '';
   container.classList.add('visible');
-  container.appendChild(createEditor(imageSrc, preset));
+  const editor = createEditor(mediaSource, preset);
+  container.appendChild(editor);
+  return editor;
 }

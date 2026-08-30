@@ -1,6 +1,7 @@
 import { renderHeader } from './layout.js';
-import { createUploadZone, fileToDataUrl } from './upload.js';
+import { createUploadZone } from './upload.js';
 import { mountEditor } from './editor.js';
+import { loadMediaFile, revokeMediaSource } from './media-source.js';
 
 document.addEventListener('DOMContentLoaded', () => {
   const headerSlot = document.getElementById('site-header');
@@ -11,9 +12,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const editorSection = document.getElementById('editor-section');
   const newImageBtn = document.getElementById('new-image-btn');
 
+  let activeMedia = null;
+  let activeEditor = null;
+
   if (!uploadMount) return;
 
   function showLanding() {
+    if (activeEditor?._cleanup) activeEditor._cleanup();
+    activeEditor = null;
+    revokeMediaSource(activeMedia);
+    activeMedia = null;
     editorSection.innerHTML = '';
     editorSection.classList.remove('visible');
     landing.classList.remove('hidden');
@@ -21,19 +29,24 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.classList.remove('editor-open');
   }
 
-  function showEditor(dataUrl) {
-    landing.classList.add('hidden');
-    editorSection.classList.add('visible');
-    newImageBtn?.classList.remove('hidden');
-    document.body.classList.add('editor-open');
-    mountEditor(editorSection, dataUrl);
+  async function showEditor(file) {
+    try {
+      const media = await loadMediaFile(file);
+      if (activeEditor?._cleanup) activeEditor._cleanup();
+      revokeMediaSource(activeMedia);
+      activeMedia = media;
+      landing.classList.add('hidden');
+      editorSection.classList.add('visible');
+      newImageBtn?.classList.remove('hidden');
+      document.body.classList.add('editor-open');
+      activeEditor = mountEditor(editorSection, media);
+    } catch (err) {
+      alert(err.message || 'Could not open file.');
+    }
   }
 
   const zone = createUploadZone({
-    onFile: async (file) => {
-      const dataUrl = await fileToDataUrl(file);
-      showEditor(dataUrl);
-    },
+    onFile: (file) => { showEditor(file); },
   });
   uploadMount.appendChild(zone);
 

@@ -91,6 +91,7 @@ button { cursor: pointer; appearance: button; }
   transition: background 0.15s;
 }
 .btn-primary:hover { background: var(--primary-hover); }
+.btn-primary:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .btn-secondary {
   display: inline-flex; align-items: center; justify-content: center;
