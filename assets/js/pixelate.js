@@ -260,6 +260,204 @@ function upscaleNearest(src, sw, sh, tw, th) {
   return canvas;
 }
 
+function luminanceAt(data, i) {
+  return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+}
+
+function grayscaleFromImageData(imageData) {
+  const { width: w, height: h, data } = imageData;
+  const gray = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      gray[y * w + x] = luminanceAt(data, i);
+    }
+  }
+  return gray;
+}
+
+function gaussianBlur3x3(gray, w, h) {
+  const out = new Float32Array(w * h);
+  const k = [1, 2, 1, 2, 4, 2, 1, 2, 1];
+  const norm = 16;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      let ki = 0;
+      for (let ky = -1; ky <= 1; ky++) {
+        for (let kx = -1; kx <= 1; kx++) {
+          const nx = clamp(x + kx, 0, w - 1);
+          const ny = clamp(y + ky, 0, h - 1);
+          sum += gray[ny * w + nx] * k[ki++];
+        }
+      }
+      out[y * w + x] = sum / norm;
+    }
+  }
+  return out;
+}
+
+function sobelGradients(gray, w, h) {
+  const mag = new Float32Array(w * h);
+  const dir = new Float32Array(w * h);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const tl = gray[(y - 1) * w + (x - 1)];
+      const tc = gray[(y - 1) * w + x];
+      const tr = gray[(y - 1) * w + (x + 1)];
+      const ml = gray[y * w + (x - 1)];
+      const mr = gray[y * w + (x + 1)];
+      const bl = gray[(y + 1) * w + (x - 1)];
+      const bc = gray[(y + 1) * w + x];
+      const br = gray[(y + 1) * w + (x + 1)];
+      const gx = -tl - 2 * ml - bl + tr + 2 * mr + br;
+      const gy = -tl - 2 * tc - tr + bl + 2 * bc + br;
+      const idx = y * w + x;
+      mag[idx] = Math.hypot(gx, gy);
+      dir[idx] = Math.atan2(gy, gx);
+    }
+  }
+  return { mag, dir };
+}
+
+function detectSobelEdges(gray, w, h, threshold) {
+  const { mag } = sobelGradients(gray, w, h);
+  const edges = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    edges[i] = mag[i] >= threshold ? 255 : 0;
+  }
+  return edges;
+}
+
+function detectCannyEdges(gray, w, h, threshold) {
+  const blurred = gaussianBlur3x3(gray, w, h);
+  const { mag, dir } = sobelGradients(blurred, w, h);
+  const low = threshold * 0.4;
+  const high = threshold;
+  const suppressed = new Float32Array(w * h);
+
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const idx = y * w + x;
+      const angle = dir[idx];
+      const m = mag[idx];
+      let q = 255;
+      let r = 255;
+      const a = ((angle + Math.PI) / Math.PI) * 4;
+      const sector = Math.round(a) % 4;
+
+      if (sector === 0) {
+        q = mag[idx + 1];
+        r = mag[idx - 1];
+      } else if (sector === 1) {
+        q = mag[(y + 1) * w + (x - 1)];
+        r = mag[(y - 1) * w + (x + 1)];
+      } else if (sector === 2) {
+        q = mag[(y + 1) * w + x];
+        r = mag[(y - 1) * w + x];
+      } else {
+        q = mag[(y - 1) * w + (x - 1)];
+        r = mag[(y + 1) * w + (x + 1)];
+      }
+
+      suppressed[idx] = m >= q && m >= r ? m : 0;
+    }
+  }
+
+  const edges = new Uint8Array(w * h);
+  const STRONG = 2;
+  const WEAK = 1;
+  const labels = new Uint8Array(w * h);
+
+  for (let i = 0; i < w * h; i++) {
+    if (suppressed[i] >= high) labels[i] = STRONG;
+    else if (suppressed[i] >= low) labels[i] = WEAK;
+  }
+
+  const queue = [];
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const idx = y * w + x;
+      if (labels[idx] !== STRONG) continue;
+      edges[idx] = 255;
+      queue.push(idx);
+    }
+  }
+
+  while (queue.length) {
+    const idx = queue.pop();
+    const x = idx % w;
+    const y = (idx - x) / w;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const ni = ny * w + nx;
+        if (labels[ni] === WEAK) {
+          labels[ni] = STRONG;
+          edges[ni] = 255;
+          queue.push(ni);
+        }
+      }
+    }
+  }
+
+  return edges;
+}
+
+function dilateEdges(edges, w, h, thickness) {
+  const radius = Math.max(0, Math.round(thickness) - 1);
+  if (radius === 0) return edges;
+  const out = new Uint8Array(edges);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!edges[y * w + x]) continue;
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          out[ny * w + nx] = 255;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function applyOutlinesToCanvas(canvas, edgeSourceData, options) {
+  const {
+    edges = 'none',
+    edgeThreshold = 50,
+    edgeThickness = 1,
+  } = options;
+  if (!edges || edges === 'none') return;
+
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  const gray = grayscaleFromImageData(edgeSourceData);
+  const threshold = clamp(edgeThreshold, 1, 255);
+  let edgeMask = edges === 'canny'
+    ? detectCannyEdges(gray, w, h, threshold)
+    : detectSobelEdges(gray, w, h, threshold);
+  edgeMask = dilateEdges(edgeMask, w, h, edgeThickness);
+
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const d = imageData.data;
+  for (let i = 0; i < w * h; i++) {
+    if (!edgeMask[i]) continue;
+    const pi = i * 4;
+    d[pi] = 0;
+    d[pi + 1] = 0;
+    d[pi + 2] = 0;
+    d[pi + 3] = 255;
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
+
 function fitToCanvas(img, targetW, targetH, fit, filterString) {
   const canvas = createCanvas(targetW, targetH);
   const ctx = canvas.getContext('2d');
@@ -294,10 +492,14 @@ export async function pixelateImage(source, options = {}) {
     outputWidth = 0,
     outputHeight = 0,
     outputFit = 'cover',
+    edges = 'none',
+    edgeThreshold = 50,
+    edgeThickness = 1,
   } = options;
 
   const filterString = buildFilterString(brightness, contrast, saturation);
   const quantizeOpts = { dither, ditherStrength, colorDistance };
+  const edgeOpts = { edges, edgeThreshold, edgeThickness };
 
   const img = typeof source === 'string' ? await loadImage(source) : source;
   const resized = resizeImage(img, MAX_EDGE);
@@ -332,15 +534,26 @@ export async function pixelateImage(source, options = {}) {
   }
 
   let palRgb = null;
+  const edgeCtx = pixelCanvas.getContext('2d');
+  const edgeSourceData = edgeOpts.edges !== 'none'
+    ? edgeCtx.getImageData(0, 0, pixelW, pixelH)
+    : null;
+
   if (paletteColors?.length) {
     palRgb = paletteColors.map(hexToRgb);
   } else if (autoPalette) {
-    const ctx = pixelCanvas.getContext('2d');
-    palRgb = extractPalette(ctx.getImageData(0, 0, pixelW, pixelH), clamp(paletteSize, 2, 64));
+    palRgb = extractPalette(edgeSourceData || edgeCtx.getImageData(0, 0, pixelW, pixelH), clamp(paletteSize, 2, 64));
   }
 
   if (palRgb) {
     applyPalette(pixelCanvas, palRgb, quantizeOpts);
+    if (previewCanvas !== pixelCanvas) {
+      previewCanvas = upscaleNearest(pixelCanvas, pixelW, pixelH, sourceW, sourceH);
+    }
+  }
+
+  if (edgeSourceData) {
+    applyOutlinesToCanvas(pixelCanvas, edgeSourceData, edgeOpts);
     if (previewCanvas !== pixelCanvas) {
       previewCanvas = upscaleNearest(pixelCanvas, pixelW, pixelH, sourceW, sourceH);
     }
