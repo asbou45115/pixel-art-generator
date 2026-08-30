@@ -1,6 +1,6 @@
 import { getAllPalettes, loadCustomPalettes, saveCustomPalettes } from './palettes.js';
-import { pixelateImage, pixelateFrames, scaleCanvas, downloadCanvas } from './pixelate.js';
-import { downloadGif, downloadWebM } from './media-export.js';
+import { pixelateImage, pixelateFrames, resolvePixelateOptions, downloadCanvas } from './pixelate.js';
+import { downloadGif, downloadMp4, pickExportCanvas } from './media-export.js';
 
 const DEFAULTS = {
   pixelSize: 8,
@@ -21,6 +21,8 @@ const DEFAULTS = {
   outputHeight: 0,
   outputFit: 'cover',
 };
+
+const THUMB_HEIGHT = 52;
 
 function computeDisplayScale(availW, availH, width, height) {
   if (!width || !height || !availW || !availH) return 1;
@@ -62,15 +64,11 @@ export function createEditor(mediaSource, preset = {}) {
   let sourceImage = null;
   let sourceFrames = isAnimation ? mediaSource.frames.map((f) => f.canvas) : [];
   let frameDelays = isAnimation ? mediaSource.frames.map((f) => f.delay) : [];
+  let selectedFrameIndex = 0;
   let result = null;
-  let processedFrames = [];
   let renderTimer = null;
   let renderGeneration = 0;
   let displayScale = 1;
-  let previewFrameIndex = 0;
-  let animRaf = null;
-  let animLastTime = 0;
-  let animAccum = 0;
   let isExporting = false;
 
   const root = document.createElement('div');
@@ -165,6 +163,9 @@ export function createEditor(mediaSource, preset = {}) {
         </div>
         <div class="processing-overlay hidden" id="processing">Processing…</div>
       </div>
+      <div class="frame-strip hidden" id="frame-strip">
+        <div class="frame-strip-scroll" id="frame-strip-scroll"></div>
+      </div>
       <div class="export-bar">
         <div class="control-group">
           <label for="exportFormat">Format</label>
@@ -192,14 +193,16 @@ export function createEditor(mediaSource, preset = {}) {
   const exportFormatSelect = root.querySelector('#exportFormat');
   const downloadBtn = root.querySelector('#download-btn');
   const frameBadge = root.querySelector('#frame-badge');
+  const frameStrip = root.querySelector('#frame-strip');
+  const frameStripScroll = root.querySelector('#frame-strip-scroll');
 
   function populateExportFormats() {
     if (isAnimation) {
       exportFormatSelect.innerHTML = `
         <option value="gif">GIF</option>
-        <option value="webm">WebM video</option>
-        <option value="png">PNG (first frame)</option>`;
-      exportFormatSelect.value = ['gif', 'webm', 'png'].includes(state.exportFormat) ? state.exportFormat : 'gif';
+        <option value="mp4">MP4 video</option>
+        <option value="png">PNG (selected frame)</option>`;
+      exportFormatSelect.value = ['gif', 'mp4', 'png'].includes(state.exportFormat) ? state.exportFormat : 'gif';
     } else {
       exportFormatSelect.innerHTML = `
         <option value="png">PNG</option>
@@ -249,54 +252,59 @@ export function createEditor(mediaSource, preset = {}) {
     return p?.colors || null;
   }
 
-  function stopPreviewLoop() {
-    if (animRaf) cancelAnimationFrame(animRaf);
-    animRaf = null;
-    animAccum = 0;
+  function buildFrameStrip() {
+    if (!isAnimation) {
+      frameStrip.classList.add('hidden');
+      return;
+    }
+    frameStrip.classList.remove('hidden');
+    frameStripScroll.innerHTML = '';
+
+    sourceFrames.forEach((srcCanvas, i) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `frame-thumb${i === selectedFrameIndex ? ' active' : ''}`;
+      btn.title = `Frame ${i + 1}`;
+      btn.setAttribute('aria-label', `Frame ${i + 1}`);
+
+      const thumbCanvas = document.createElement('canvas');
+      const scale = THUMB_HEIGHT / srcCanvas.height;
+      thumbCanvas.width = Math.max(1, Math.round(srcCanvas.width * scale));
+      thumbCanvas.height = THUMB_HEIGHT;
+      const tctx = thumbCanvas.getContext('2d');
+      tctx.imageSmoothingEnabled = false;
+      tctx.drawImage(srcCanvas, 0, 0, thumbCanvas.width, thumbCanvas.height);
+
+      const label = document.createElement('span');
+      label.className = 'frame-thumb-num';
+      label.textContent = String(i + 1);
+
+      btn.append(thumbCanvas, label);
+      btn.addEventListener('click', () => {
+        if (selectedFrameIndex === i) return;
+        selectedFrameIndex = i;
+        updateFrameStripActive();
+        scheduleRender();
+      });
+      frameStripScroll.appendChild(btn);
+    });
   }
 
-  function startPreviewLoop() {
-    stopPreviewLoop();
-    if (!isAnimation || !processedFrames.length) return;
-
-    const drawFrame = (index) => {
-      const frame = processedFrames[index];
-      if (!frame) return;
-      canvas.width = frame.width;
-      canvas.height = frame.height;
-      ctx.imageSmoothingEnabled = false;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(frame.canvas, 0, 0);
-      result = frame;
-      fitPreview();
-      updateBadges(index);
-    };
-
-    previewFrameIndex = 0;
-    drawFrame(0);
-    animLastTime = performance.now();
-
-    const tick = (now) => {
-      const delay = processedFrames[previewFrameIndex]?.delay || 100;
-      animAccum += now - animLastTime;
-      animLastTime = now;
-      if (animAccum >= delay) {
-        animAccum = 0;
-        previewFrameIndex = (previewFrameIndex + 1) % processedFrames.length;
-        drawFrame(previewFrameIndex);
-      }
-      animRaf = requestAnimationFrame(tick);
-    };
-    animRaf = requestAnimationFrame(tick);
+  function updateFrameStripActive() {
+    frameStripScroll.querySelectorAll('.frame-thumb').forEach((btn, i) => {
+      const active = i === selectedFrameIndex;
+      btn.classList.toggle('active', active);
+      if (active) btn.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+    });
   }
 
-  function updateBadges(frameIndex = 0) {
+  function updateBadges() {
     if (!result) return;
     root.querySelector('#size-badge').textContent = `${result.pixelWidth} × ${result.pixelHeight} px`;
     const blockLabel = `Block: ${state.pixelSize}px · Preview ${result.width}×${result.height}`;
     if (isAnimation) {
       frameBadge.classList.remove('hidden');
-      frameBadge.textContent = `Frame ${frameIndex + 1}/${processedFrames.length}`;
+      frameBadge.textContent = `Frame ${selectedFrameIndex + 1}/${sourceFrames.length}`;
       root.querySelector('#pixel-badge').textContent = `${mediaSource.label} · ${blockLabel}`;
     } else {
       frameBadge.classList.add('hidden');
@@ -362,7 +370,6 @@ export function createEditor(mediaSource, preset = {}) {
 
   function drawToCanvas() {
     if (!result) return;
-    stopPreviewLoop();
     canvas.width = result.width;
     canvas.height = result.height;
     ctx.imageSmoothingEnabled = false;
@@ -374,7 +381,7 @@ export function createEditor(mediaSource, preset = {}) {
 
   function scheduleRender() {
     clearTimeout(renderTimer);
-    renderTimer = setTimeout(render, isAnimation ? 200 : 80);
+    renderTimer = setTimeout(render, isAnimation ? 150 : 80);
   }
 
   function setProcessing(active, message = 'Processing…') {
@@ -383,32 +390,29 @@ export function createEditor(mediaSource, preset = {}) {
     downloadBtn.disabled = active;
   }
 
+  async function renderPreviewFrame() {
+    const options = buildPixelateOptions(state, getPaletteColors());
+    const source = isAnimation ? sourceFrames[selectedFrameIndex] : sourceImage;
+    result = await pixelateImage(source, options);
+    drawToCanvas();
+  }
+
+  async function renderAllFrames(onProgress) {
+    let options = buildPixelateOptions(state, getPaletteColors());
+    if (options.autoPalette) {
+      options = await resolvePixelateOptions(sourceFrames[selectedFrameIndex], options);
+    }
+    return pixelateFrames(sourceFrames, options, onProgress);
+  }
+
   async function render() {
     if (isAnimation ? !sourceFrames.length : !sourceImage) return;
     const generation = ++renderGeneration;
-    setProcessing(true, isAnimation ? 'Processing frames…' : 'Processing…');
-    stopPreviewLoop();
+    setProcessing(true, isAnimation ? 'Updating preview…' : 'Processing…');
 
     try {
-      const options = buildPixelateOptions(state, getPaletteColors());
-
-      if (isAnimation) {
-        const results = await pixelateFrames(sourceFrames, options, (done, total) => {
-          if (generation !== renderGeneration) return;
-          setProcessing(true, `Processing frame ${done}/${total}…`);
-        });
-        if (generation !== renderGeneration) return;
-        processedFrames = results.map((r, i) => ({
-          ...r,
-          delay: frameDelays[i] || 100,
-        }));
-        result = processedFrames[0];
-        startPreviewLoop();
-      } else {
-        result = await pixelateImage(sourceImage, options);
-        processedFrames = [];
-        drawToCanvas();
-      }
+      await renderPreviewFrame();
+      if (generation !== renderGeneration) return;
     } finally {
       if (generation === renderGeneration) setProcessing(false);
     }
@@ -485,33 +489,32 @@ export function createEditor(mediaSource, preset = {}) {
   downloadBtn.addEventListener('click', async () => {
     if (!result || isExporting) return;
     isExporting = true;
-    stopPreviewLoop();
-    setProcessing(true, 'Preparing export…');
 
     try {
-      if (isAnimation && processedFrames.length) {
+      if (isAnimation && (state.exportFormat === 'gif' || state.exportFormat === 'mp4')) {
+        setProcessing(true, 'Rendering all frames…');
+        const allFrames = await renderAllFrames((done, total) => {
+          setProcessing(true, `Rendering frame ${done}/${total}…`);
+        });
+
         if (state.exportFormat === 'gif') {
-          downloadGif(processedFrames, frameDelays, state.exportSize);
-        } else if (state.exportFormat === 'webm') {
-          await downloadWebM(processedFrames, frameDelays, state.exportSize, (done, total) => {
+          setProcessing(true, 'Encoding GIF…');
+          downloadGif(allFrames, frameDelays, state.exportSize);
+        } else {
+          await downloadMp4(allFrames, frameDelays, state.exportSize, (done, total) => {
             setProcessing(true, `Encoding video ${done}/${total}…`);
           });
-        } else {
-          const first = processedFrames[0];
-          let out = first.pixelCanvas || first.canvas;
-          if (state.exportSize === 'source') out = first.canvas;
-          else if (state.exportSize === 'double') out = scaleCanvas(first.canvas, first.width * 2, first.height * 2);
-          else if (state.exportSize === 'quad') out = scaleCanvas(first.canvas, first.width * 4, first.height * 4);
-          downloadCanvas(out, 'pixel-art.png', 'png', state.exportQuality);
         }
-        startPreviewLoop();
         return;
       }
 
-      let out = result.pixelCanvas || result.canvas;
-      if (state.exportSize === 'source') out = result.canvas;
-      else if (state.exportSize === 'double') out = scaleCanvas(result.canvas, result.width * 2, result.height * 2);
-      else if (state.exportSize === 'quad') out = scaleCanvas(result.canvas, result.width * 4, result.height * 4);
+      setProcessing(true, 'Preparing export…');
+      const out = pickExportCanvas(result, state.exportSize);
+      if (isAnimation && state.exportFormat === 'png') {
+        downloadCanvas(out, 'pixel-art.png', 'png', state.exportQuality);
+        return;
+      }
+
       const ext = state.exportFormat === 'jpeg' ? 'jpg' : state.exportFormat;
       downloadCanvas(out, `pixel-art.${ext}`, state.exportFormat, state.exportQuality);
     } finally {
@@ -546,6 +549,7 @@ export function createEditor(mediaSource, preset = {}) {
 
   populatePalettes();
   populateExportFormats();
+  buildFrameStrip();
 
   if (preset.dither) {
     const method = typeof preset.dither === 'string' ? preset.dither : 'floyd-steinberg';
@@ -562,7 +566,6 @@ export function createEditor(mediaSource, preset = {}) {
   window.addEventListener('resize', fitPreview);
 
   root._cleanup = () => {
-    stopPreviewLoop();
     resizeObserver.disconnect();
   };
 

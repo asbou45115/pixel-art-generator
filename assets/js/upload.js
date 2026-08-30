@@ -1,5 +1,3 @@
-const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
-const MAX_VIDEO_SIZE = 25 * 1024 * 1024;
 const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 const VIDEO_TYPES = ['video/mp4', 'video/webm', 'video/quicktime', 'video/ogg'];
 
@@ -7,11 +5,6 @@ function isAccepted(file) {
   if (IMAGE_TYPES.includes(file.type)) return true;
   if (VIDEO_TYPES.includes(file.type) || file.type.startsWith('video/')) return true;
   return false;
-}
-
-function maxSizeFor(file) {
-  if (file.type.startsWith('video/') || VIDEO_TYPES.includes(file.type)) return MAX_VIDEO_SIZE;
-  return MAX_IMAGE_SIZE;
 }
 
 export function createUploadZone({ onFile }) {
@@ -33,11 +26,6 @@ export function createUploadZone({ onFile }) {
     if (!file) return;
     if (!isAccepted(file)) {
       live.textContent = 'Please upload an image, GIF, or video file.';
-      return;
-    }
-    const maxSize = maxSizeFor(file);
-    if (file.size > maxSize) {
-      live.textContent = `File is too large. Maximum size is ${Math.round(maxSize / (1024 * 1024))}MB.`;
       return;
     }
     live.textContent = `Selected ${file.name}`;

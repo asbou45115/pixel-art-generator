@@ -12,20 +12,21 @@ Then open http://localhost:8080
 
 ## Features
 
-- Upload PNG, JPG, GIF, WEBP, MP4, or WebM (images up to 10MB, video up to 25MB)
-- Animated GIF and video support with live preview
-- Export animations as GIF or WebM video
+- Upload PNG, JPG, GIF, WEBP, MP4, or WebM — no file size limit (client-side only)
+- Animated GIF and video support with a frame strip to preview individual frames
+- Export animations as GIF or MP4 (full render on export)
 - Live pixel size, brightness, contrast, saturation controls
 - Built-in palettes (Pico-8, Lost Century, Game Boy, NES, and more)
-- Auto palette extracted from the source (shared across animation frames)
+- Auto palette extracted from the source (shared across animation frames on export)
 - Floyd-Steinberg and ordered dithering
 - Lospec palette import
 - Export still images as PNG, JPEG, or WebP at multiple sizes
 
 ## Limits
 
-- GIFs and videos are capped at 150 frames and 15 seconds of video
+- GIFs and videos are sampled to 150 frames and 15 seconds of video for performance
 - Animated GIF decoding requires a browser with `ImageDecoder` support (Chrome, Edge, Firefox)
+- MP4 export uses WebCodecs when available, otherwise falls back to the browser's native recorder
 
 ## Project structure
 
@@ -41,6 +42,7 @@ assets/
     palettes.js      Palette data
     upload.js        Upload zone
     media-source.js  GIF/video frame loading
-    media-export.js  GIF/WebM export
+    media-export.js  GIF/MP4 export
     gifenc.js        GIF encoder (vendored)
+    mp4-muxer.js     MP4 muxer (vendored)
 ```

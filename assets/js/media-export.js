@@ -9,7 +9,7 @@ function downloadBlob(blob, filename) {
   URL.revokeObjectURL(a.href);
 }
 
-function pickExportCanvas(result, exportSize) {
+export function pickExportCanvas(result, exportSize) {
   let out = result.pixelCanvas || result.canvas;
   if (exportSize === 'source') out = result.canvas;
   else if (exportSize === 'double') out = scaleCanvas(result.canvas, result.width * 2, result.height * 2);
@@ -41,17 +41,62 @@ export function encodeGif(results, delays, exportSize = 'pixel') {
   return new Blob([encoder.bytesView()], { type: 'image/gif' });
 }
 
-function pickMimeType() {
+function pickRecorderMimeType() {
   const types = [
+    'video/mp4;codecs=avc1',
+    'video/mp4',
     'video/webm;codecs=vp9',
     'video/webm;codecs=vp8',
     'video/webm',
   ];
-  return types.find((t) => MediaRecorder.isTypeSupported(t)) || 'video/webm';
+  return types.find((t) => MediaRecorder.isTypeSupported(t)) || null;
 }
 
-export async function encodeWebM(results, delays, exportSize = 'pixel', onProgress) {
-  if (!results.length) throw new Error('No frames to export.');
+async function encodeMp4WithWebCodecs(results, delays, exportSize, onProgress) {
+  const { Muxer, ArrayBufferTarget } = await import('./mp4-muxer.js');
+  const first = pickExportCanvas(results[0], exportSize);
+  const width = first.width;
+  const height = first.height;
+
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: { codec: 'avc', width, height },
+    fastStart: 'in-memory',
+  });
+
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: (e) => { throw e; },
+  });
+
+  encoder.configure({
+    codec: 'avc1.42001E',
+    width,
+    height,
+    bitrate: 4_000_000,
+  });
+
+  let timestampUs = 0;
+  for (let i = 0; i < results.length; i++) {
+    const frameCanvas = pickExportCanvas(results[i], exportSize);
+    const frame = new VideoFrame(frameCanvas, { timestamp: timestampUs });
+    encoder.encode(frame, { keyFrame: i % 30 === 0 });
+    frame.close();
+    timestampUs += (delays[i] || 100) * 1000;
+    onProgress?.(i + 1, results.length);
+    await new Promise((r) => setTimeout(r, 0));
+  }
+
+  await encoder.flush();
+  encoder.close();
+  muxer.finalize();
+  return new Blob([muxer.target.buffer], { type: 'video/mp4' });
+}
+
+async function encodeMp4WithRecorder(results, delays, exportSize, onProgress) {
+  const mime = pickRecorderMimeType();
+  if (!mime) throw new Error('This browser cannot encode MP4 video.');
+
   const first = pickExportCanvas(results[0], exportSize);
   const width = first.width;
   const height = first.height;
@@ -65,7 +110,6 @@ export async function encodeWebM(results, delays, exportSize = 'pixel', onProgre
   const frameDelay = 1000 / fps;
 
   const stream = canvas.captureStream(fps);
-  const mime = pickMimeType();
   const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 4_000_000 });
   const chunks = [];
 
@@ -89,7 +133,20 @@ export async function encodeWebM(results, delays, exportSize = 'pixel', onProgre
 
   recorder.stop();
   await stopped;
-  return new Blob(chunks, { type: mime.split(';')[0] });
+  const ext = mime.includes('mp4') ? 'video/mp4' : 'video/webm';
+  return new Blob(chunks, { type: ext });
+}
+
+export async function encodeMp4(results, delays, exportSize = 'pixel', onProgress) {
+  if (!results.length) throw new Error('No frames to export.');
+  if (typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined') {
+    try {
+      return await encodeMp4WithWebCodecs(results, delays, exportSize, onProgress);
+    } catch {
+      // Fall through to MediaRecorder
+    }
+  }
+  return encodeMp4WithRecorder(results, delays, exportSize, onProgress);
 }
 
 export function downloadGif(results, delays, exportSize) {
@@ -97,7 +154,8 @@ export function downloadGif(results, delays, exportSize) {
   downloadBlob(blob, 'pixel-art.gif');
 }
 
-export async function downloadWebM(results, delays, exportSize, onProgress) {
-  const blob = await encodeWebM(results, delays, exportSize, onProgress);
-  downloadBlob(blob, 'pixel-art.webm');
+export async function downloadMp4(results, delays, exportSize, onProgress) {
+  const blob = await encodeMp4(results, delays, exportSize, onProgress);
+  const ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
+  downloadBlob(blob, `pixel-art.${ext}`);
 }

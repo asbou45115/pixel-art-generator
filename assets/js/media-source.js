@@ -21,10 +21,11 @@ function canvasFromSource(source, w, h) {
   return canvas;
 }
 
-async function decodeGifFrames(file) {
+async function decodeGifFrames(file, onProgress) {
   if (!('ImageDecoder' in window)) {
     throw new Error('Animated GIF requires a modern browser with ImageDecoder support.');
   }
+  onProgress?.('Decoding GIF…');
   const buffer = await file.arrayBuffer();
   const decoder = new ImageDecoder({ data: buffer, type: 'image/gif' });
   await decoder.tracks.ready;
@@ -39,6 +40,7 @@ async function decodeGifFrames(file) {
   let height = 0;
 
   for (let i = 0; i < take; i++) {
+    onProgress?.(`Decoding frame ${i + 1} of ${take}…`);
     const index = Math.min(frameCount - 1, Math.floor(i * step));
     const { image } = await decoder.decode({ frameIndex: index });
     width = image.displayWidth;
@@ -83,7 +85,7 @@ function seekVideo(video, time) {
   });
 }
 
-async function extractVideoFrames(video) {
+async function extractVideoFrames(video, onProgress) {
   const duration = Math.min(video.duration || 0, MAX_VIDEO_DURATION);
   if (!duration || !video.videoWidth) throw new Error('Video has no readable frames.');
 
@@ -94,6 +96,7 @@ async function extractVideoFrames(video) {
   const delay = 1000 / VIDEO_SAMPLE_FPS;
 
   for (let i = 0; i < frameCount; i++) {
+    onProgress?.(`Extracting frame ${i + 1} of ${frameCount}…`);
     const t = frameCount === 1 ? 0 : (i / (frameCount - 1)) * duration;
     await seekVideo(video, t);
     frames.push({
@@ -110,10 +113,11 @@ async function extractVideoFrames(video) {
   };
 }
 
-export async function loadMediaFile(file) {
+export async function loadMediaFile(file, onProgress) {
   const kind = detectMediaKind(file);
   if (!kind) throw new Error('Unsupported file type.');
 
+  onProgress?.('Reading file…');
   const url = URL.createObjectURL(file);
 
   if (kind === 'image') {
@@ -126,14 +130,13 @@ export async function loadMediaFile(file) {
   }
 
   if (kind === 'gif') {
-    const { frames, width, height } = await decodeGifFrames(file);
+    const { frames, width, height } = await decodeGifFrames(file, onProgress);
     if (frames.length === 1) {
       return {
         kind: 'image',
         file,
         url,
         label: 'Image',
-        previewUrl: url,
       };
     }
     return {
@@ -148,8 +151,10 @@ export async function loadMediaFile(file) {
     };
   }
 
+  onProgress?.('Loading video…');
   const video = await loadVideoElement(url);
-  const { frames, width, height, duration } = await extractVideoFrames(video);
+  onProgress?.('Extracting frames from video…');
+  const { frames, width, height, duration } = await extractVideoFrames(video, onProgress);
   video.removeAttribute('src');
   video.load();
 
