@@ -2,7 +2,7 @@ export function renderHeader() {
   return `
     <a href="#main-content" class="sr-only">Skip to main content</a>
     <div class="header-inner">
-      <a href="/" class="logo" aria-label="Pixel Art Generator">Pixel Art Generator</a>
+      <a href="./" class="logo" aria-label="Pixel Art Generator">Pixel Art Generator</a>
       <div class="header-actions">
         <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
           <svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true">

@@ -45,8 +45,26 @@ Upload any of these from the landing page, or use **Upload file** in the editor 
 - Built-in palettes (Pico-8, Lost Century, Game Boy, NES, and more)
 - Auto palette extracted from the source (shared across animation frames on export)
 - Floyd-Steinberg and ordered dithering
+- Optional black outlines via edge detection (Sobel or Canny), with threshold and line-thickness sliders
 - Lospec palette import
 - Export still images as PNG, JPEG, or WebP at multiple sizes
+
+### Edge detection (outlines)
+
+The **Outlines** panel adds retro-style black line art on top of the pixelated image. Outlines are drawn after palette quantization and dithering so they stay solid black.
+
+| Control | Description |
+| --- | --- |
+| **Edge detection** | `None`, `Sobel`, or `Canny` |
+| **Edge threshold** | 1–255 (default 50). Lower = more lines; higher = only the strongest edges |
+| **Line thickness** | 1–5 px (default 1). Thickens detected edges before compositing |
+
+- **Sobel** — fast gradient-based edges; good starting point for a crisp pixel-art look
+- **Canny** — blur, non-max suppression, and hysteresis; smoother, less noisy outlines at similar thresholds
+
+Edges are detected on the downscaled image (before quantization) for cleaner lines, then stamped onto the final output. Works on still images and every frame of GIF/video exports.
+
+**Suggested starting point:** enable a palette + ordered dither, then try Sobel with threshold ~30–60 and thickness 1.
 
 ## Limits
 
