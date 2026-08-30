@@ -2,9 +2,8 @@
 
 Browser tool that converts images, GIFs, and videos to pixel art with live preview, palettes, dithering, and private client-side processing.
 
-## Webpage
-
-https://asbou45115.github.io/pixel-art-generator/
+## Webpage:
+Check it out [here](https://asbou45115.github.io/pixel-art-generator/)
 
 ## Run locally
 
