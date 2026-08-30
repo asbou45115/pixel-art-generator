@@ -1,9 +1,15 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#ffffff">
+  <meta name="theme-color" content="#12141c">
+  <script>
+    (function () {
+      var t = localStorage.getItem('pag-theme');
+      document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark';
+    })();
+  </script>
   <title>Pixel Art Generator</title>
   <meta name="description" content="Turn images, GIFs, and videos into pixel art in your browser. Live preview, palettes, dithering, and private client-side processing.">
   <link rel="stylesheet" href="/assets/css/styles.css">

@@ -3,14 +3,17 @@ import { createUploadZone } from './upload.js';
 import { mountEditor } from './editor.js';
 import { loadMediaFile, revokeMediaSource, detectMediaKind } from './media-source.js';
 import { createTaskRunner } from './progress.js';
+import { initTheme, bindThemeToggle } from './theme.js';
 
 function isAccepted(file) {
   return detectMediaKind(file) !== null;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  initTheme();
   const headerSlot = document.getElementById('site-header');
   if (headerSlot) headerSlot.innerHTML = renderHeader();
+  bindThemeToggle(document.getElementById('theme-toggle'));
 
   const landing = document.getElementById('landing');
   const uploadMount = document.getElementById('upload-mount');

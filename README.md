@@ -10,11 +10,21 @@ py -m http.server 8080
 
 Then open http://localhost:8080
 
+## Try an example
+
+A sample animated GIF is included for testing:
+
+- File: [`assets/examples/gif_example.gif`](assets/examples/gif_example.gif)
+- In the app: upload it from the landing page, or use **Upload file** in the editor header after opening any image
+
+Use it to try the frame strip, play preview, palette/dither controls, and GIF/MP4 export.
+
 ## Features
 
 - Upload PNG, JPG, GIF, WEBP, MP4, or WebM — no file size limit (client-side only)
 - Animated GIF and video support with a frame strip to preview individual frames
-- Play animation preview in the browser before exporting
+- Play animation preview in the browser (cycles source frames; settings apply to the selected frame only)
+- Dark mode by default with light/dark toggle in the header
 - Header export controls: upload file, format, output size, and download
 - Export animations as GIF or MP4 with progress bar and cancel support
 - Live pixel size, brightness, contrast, saturation controls
@@ -35,6 +45,8 @@ Then open http://localhost:8080
 ```
 index.html
 assets/
+  examples/
+    gif_example.gif   Sample GIF for testing animations
   css/styles.css
   js/
     main.js          Page bootstrap
@@ -46,6 +58,8 @@ assets/
     media-source.js  GIF/video frame loading
     media-export.js  GIF/MP4 export
     progress.js      Cancellable task overlay with progress
+    theme.js         Dark/light theme toggle
+    range-input.js   Filled range slider styling
     gifenc.js        GIF encoder (vendored)
     mp4-muxer.js     MP4 muxer (vendored)
 ```

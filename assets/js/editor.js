@@ -1,6 +1,7 @@
 import { getAllPalettes, loadCustomPalettes, saveCustomPalettes } from './palettes.js';
 import { pixelateImage, pixelateFrames, resolvePixelateOptions, downloadCanvas } from './pixelate.js';
 import { downloadGif, downloadMp4, pickExportCanvas } from './media-export.js';
+import { initRangeSlider } from './range-input.js';
 
 const DEFAULTS = {
   pixelSize: 8,
@@ -50,20 +51,6 @@ function buildPixelateOptions(state, paletteColors) {
   };
 }
 
-function settingsKey(state) {
-  return JSON.stringify({
-    pixelSize: state.pixelSize,
-    brightness: state.brightness,
-    contrast: state.contrast,
-    saturation: state.saturation,
-    palette: state.palette,
-    dither: state.dither,
-    ditherStrength: state.ditherStrength,
-    paletteSize: state.paletteSize,
-    colorDistance: state.colorDistance,
-  });
-}
-
 export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile, tasks } = {}) {
   const state = { ...DEFAULTS, ...preset };
   const isAnimation = mediaSource.kind === 'animation';
@@ -83,10 +70,10 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   let renderTimer = null;
   let renderGeneration = 0;
   let displayScale = 1;
+  let previewWidth = 0;
+  let previewHeight = 0;
   let isBusy = false;
 
-  let playCacheKey = '';
-  let playCacheFrames = [];
   let isPlaying = false;
   let animRaf = null;
   let animAccum = 0;
@@ -177,7 +164,6 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
           <span class="badge" id="pixel-badge">—</span>
           <span class="badge hidden" id="frame-badge">—</span>
         </div>
-        <button type="button" class="btn-sm hidden" id="play-btn">Play</button>
       </div>
       <div class="preview-container" id="preview-container">
         <div class="preview-frame" id="preview-frame">
@@ -185,6 +171,12 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
           <canvas id="preview-grid" class="preview-grid hidden" aria-hidden="true"></canvas>
         </div>
         <div class="processing-overlay hidden" id="processing">Processing…</div>
+      </div>
+      <div class="frame-controls hidden" id="frame-controls">
+        <button type="button" class="play-btn" id="play-btn" aria-label="Play animation">
+          <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+          <svg class="icon-pause hidden" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" fill="currentColor"/></svg>
+        </button>
       </div>
       <div class="frame-strip hidden" id="frame-strip">
         <div class="frame-strip-scroll" id="frame-strip-scroll"></div>
@@ -199,6 +191,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   const paletteSelect = root.querySelector('#palette');
   const frameBadge = root.querySelector('#frame-badge');
   const frameStrip = root.querySelector('#frame-strip');
+  const frameControls = root.querySelector('#frame-controls');
   const frameStripScroll = root.querySelector('#frame-strip-scroll');
   const playBtn = root.querySelector('#play-btn');
 
@@ -210,7 +203,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   function mountHeaderControls() {
     if (!headerBar) return;
     headerBar.innerHTML = `
-      <button type="button" class="btn-secondary" id="header-upload-btn">Upload file</button>
+      <button type="button" class="btn-primary" id="header-upload-btn">Upload file</button>
       <label class="header-field">
         <span class="sr-only">Format</span>
         <select id="header-export-format" class="header-select"></select>
@@ -264,21 +257,22 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     if (playBtn) playBtn.disabled = disabled;
   }
 
-  function invalidatePlayCache() {
-    playCacheKey = '';
-    playCacheFrames = [];
-    stopPlayback();
+  function setPlayButtonState(playing) {
+    if (!playBtn) return;
+    playBtn.classList.toggle('playing', playing);
+    playBtn.setAttribute('aria-label', playing ? 'Pause animation' : 'Play animation');
+    playBtn.querySelector('.icon-play')?.classList.toggle('hidden', playing);
+    playBtn.querySelector('.icon-pause')?.classList.toggle('hidden', !playing);
   }
 
-  function stopPlayback() {
+  function stopPlayback({ restore = true } = {}) {
+    if (!isPlaying) return;
     isPlaying = false;
     if (animRaf) cancelAnimationFrame(animRaf);
     animRaf = null;
     animAccum = 0;
-    if (playBtn) {
-      playBtn.textContent = 'Play';
-      playBtn.classList.remove('playing');
-    }
+    setPlayButtonState(false);
+    if (restore) renderPreviewFrame();
   }
 
   function populatePalettes() {
@@ -324,11 +318,11 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   function buildFrameStrip() {
     if (!isAnimation) {
       frameStrip.classList.add('hidden');
-      playBtn.classList.add('hidden');
+      frameControls.classList.add('hidden');
       return;
     }
     frameStrip.classList.remove('hidden');
-    playBtn.classList.remove('hidden');
+    frameControls.classList.remove('hidden');
     frameStripScroll.innerHTML = '';
 
     sourceFrames.forEach((srcCanvas, i) => {
@@ -371,9 +365,12 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   }
 
   function updateBadges(frameIndex = selectedFrameIndex) {
-    if (!result) return;
-    root.querySelector('#size-badge').textContent = `${result.pixelWidth} × ${result.pixelHeight} px`;
-    const blockLabel = `Block: ${state.pixelSize}px · Preview ${result.width}×${result.height}`;
+    const w = result?.pixelWidth;
+    const h = result?.pixelHeight;
+    if (w && h) root.querySelector('#size-badge').textContent = `${w} × ${h} px`;
+    const blockLabel = result
+      ? `Block: ${state.pixelSize}px · Preview ${result.width}×${result.height}`
+      : `Block: ${state.pixelSize}px`;
     if (isAnimation) {
       frameBadge.classList.remove('hidden');
       frameBadge.textContent = `Frame ${frameIndex + 1}/${sourceFrames.length}`;
@@ -386,6 +383,8 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
 
   function drawResultFrame(frameResult, frameIndex) {
     result = frameResult;
+    previewWidth = frameResult.width;
+    previewHeight = frameResult.height;
     canvas.width = frameResult.width;
     canvas.height = frameResult.height;
     ctx.imageSmoothingEnabled = false;
@@ -395,16 +394,36 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     updateBadges(frameIndex);
   }
 
-  function fitPreview() {
-    if (!root.isConnected || !result) return;
+  function showSourceFrame(index) {
+    const src = sourceFrames[index];
+    previewWidth = src.width;
+    previewHeight = src.height;
+    canvas.width = src.width;
+    canvas.height = src.height;
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(src, 0, 0);
+    gridCanvas.classList.add('hidden');
+    fitPreviewFromSize(src.width, src.height);
+    updateBadges(index);
+  }
+
+  function fitPreviewFromSize(width, height) {
+    if (!root.isConnected || !width || !height) return;
     const availW = previewContainer.clientWidth;
     const availH = previewContainer.clientHeight;
-    displayScale = computeDisplayScale(availW, availH, result.width, result.height);
-    const dispW = result.width * displayScale;
-    const dispH = result.height * displayScale;
+    displayScale = computeDisplayScale(availW, availH, width, height);
+    const dispW = width * displayScale;
+    const dispH = height * displayScale;
     canvas.style.width = `${dispW}px`;
     canvas.style.height = `${dispH}px`;
-    updateGridOverlay(dispW, dispH);
+    if (result && state.showGrid && !isPlaying) updateGridOverlay(dispW, dispH);
+    else gridCanvas.classList.add('hidden');
+  }
+
+  function fitPreview() {
+    if (result) fitPreviewFromSize(result.width, result.height);
+    else if (previewWidth && previewHeight) fitPreviewFromSize(previewWidth, previewHeight);
   }
 
   function updateGridOverlay(dispW, dispH) {
@@ -452,7 +471,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   }
 
   function scheduleRender() {
-    invalidatePlayCache();
+    if (isPlaying) stopPlayback({ restore: false });
     clearTimeout(renderTimer);
     renderTimer = setTimeout(render, isAnimation ? 150 : 80);
   }
@@ -470,73 +489,35 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     updateFrameStripActive();
   }
 
-  async function ensurePlayCache(signal, update) {
-    const key = settingsKey(state);
-    if (playCacheKey === key && playCacheFrames.length) return playCacheFrames;
-
-    let options = buildPixelateOptions(state, getPaletteColors());
-    if (options.autoPalette) {
-      options = await resolvePixelateOptions(sourceFrames[selectedFrameIndex], options);
-    }
-
-    const frames = await pixelateFrames(sourceFrames, options, (done, total) => {
-      update(`Rendering preview ${done}/${total}…`, Math.round((done / total) * 100));
-    }, signal);
-
-    playCacheKey = key;
-    playCacheFrames = frames.map((r, i) => ({ ...r, delay: frameDelays[i] || 100 }));
-    return playCacheFrames;
-  }
-
-  async function togglePlayback() {
+  function togglePlayback() {
     if (!isAnimation || isBusy) return;
-
     if (isPlaying) {
       stopPlayback();
-      await renderPreviewFrame();
       return;
     }
-
-    isBusy = true;
-    setHeaderDisabled(true);
-
-    const cacheResult = await tasks.run(async (signal, update) => {
-      return ensurePlayCache(signal, update);
-    }, { label: 'Preparing playback…', cancellable: true, progress: true });
-
-    isBusy = false;
-    setHeaderDisabled(false);
-
-    if (cacheResult?.cancelled || !cacheResult) {
-      await renderPreviewFrame();
-      return;
-    }
-
-    playCacheFrames = cacheResult;
     startPlayback();
   }
 
   function startPlayback() {
-    if (!playCacheFrames.length) return;
-    stopPlayback();
+    if (!sourceFrames.length) return;
     isPlaying = true;
-    playBtn.textContent = 'Stop';
-    playBtn.classList.add('playing');
-    playFrameIndex = 0;
-    drawResultFrame(playCacheFrames[0], 0);
-    updateFrameStripActive();
+    setPlayButtonState(true);
+    playFrameIndex = selectedFrameIndex;
     animLastTime = performance.now();
+    animAccum = 0;
+    showSourceFrame(playFrameIndex);
+    updateFrameStripActive();
 
     const tick = (now) => {
       if (!isPlaying) return;
-      const delay = playCacheFrames[playFrameIndex]?.delay || 100;
+      const delay = frameDelays[playFrameIndex] || 100;
       animAccum += now - animLastTime;
       animLastTime = now;
       if (animAccum >= delay) {
         animAccum = 0;
-        playFrameIndex = (playFrameIndex + 1) % playCacheFrames.length;
+        playFrameIndex = (playFrameIndex + 1) % sourceFrames.length;
         selectedFrameIndex = playFrameIndex;
-        drawResultFrame(playCacheFrames[playFrameIndex], playFrameIndex);
+        showSourceFrame(playFrameIndex);
         updateFrameStripActive();
       }
       animRaf = requestAnimationFrame(tick);
@@ -611,6 +592,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   function bindRange(id, key) {
     const el = root.querySelector(`#${id}`);
     const val = root.querySelector(`#val-${id}`);
+    initRangeSlider(el);
     el.addEventListener('input', () => {
       state[key] = Number(el.value);
       if (val) val.textContent = id === 'ditherStrength' ? `${state[key]}%` : state[key];
@@ -660,6 +642,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
       el.value = state[el.id];
       const val = root.querySelector(`#val-${el.id}`);
       if (val) val.textContent = el.id === 'ditherStrength' ? `${state[el.id]}%` : state[el.id];
+      el.dispatchEvent(new Event('input'));
     });
     root.querySelector('#ditherMethod').value = state.dither;
     root.querySelector('#colorDistance').value = state.colorDistance;
@@ -714,7 +697,11 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   window.addEventListener('resize', fitPreview);
 
   root._cleanup = () => {
-    stopPlayback();
+    if (isPlaying) {
+      isPlaying = false;
+      if (animRaf) cancelAnimationFrame(animRaf);
+      animRaf = null;
+    }
     resizeObserver.disconnect();
     if (headerBar) headerBar.innerHTML = '';
   };
