@@ -1,5 +1,10 @@
 import { getAllPalettes, loadCustomPalettes, saveCustomPalettes } from './palettes.js';
-import { pixelateImage, scaleCanvas, downloadCanvas } from './pixelate.js';
+import { pixelateImage, pixelateFrames, resolvePixelateOptions, downloadCanvas } from './pixelate.js';
+import { downloadGif, downloadMp4, pickExportCanvas } from './media-export.js';
+import { initRangeSlider } from './range-input.js';
+import { yieldToMain } from './progress.js';
+
+const PREFETCH_AHEAD = 4;
 
 const DEFAULTS = {
   pixelSize: 8,
@@ -14,12 +19,14 @@ const DEFAULTS = {
   colorDistance: 'rgb',
   showGrid: false,
   exportFormat: 'png',
-  exportSize: 'pixel',
+  exportSize: 'source',
   exportQuality: 0.92,
   outputWidth: 0,
   outputHeight: 0,
   outputFit: 'cover',
 };
+
+const THUMB_HEIGHT = 52;
 
 function computeDisplayScale(availW, availH, width, height) {
   if (!width || !height || !availW || !availH) return 1;
@@ -28,18 +35,71 @@ function computeDisplayScale(availW, availH, width, height) {
   return fit;
 }
 
-export function createEditor(imageSrc, preset = {}) {
+function buildPixelateOptions(state, paletteColors) {
+  const usePalette = state.autoPalette || (paletteColors && state.palette !== 'none');
+  return {
+    pixelSize: state.pixelSize,
+    brightness: state.brightness,
+    contrast: state.contrast,
+    saturation: state.saturation,
+    paletteColors: usePalette ? paletteColors : null,
+    dither: usePalette ? state.dither : 'none',
+    ditherStrength: state.ditherStrength,
+    autoPalette: state.autoPalette,
+    paletteSize: state.paletteSize,
+    colorDistance: state.colorDistance,
+    outputWidth: state.outputWidth,
+    outputHeight: state.outputHeight,
+    outputFit: state.outputFit,
+  };
+}
+
+function settingsKey(state) {
+  return JSON.stringify({
+    pixelSize: state.pixelSize,
+    brightness: state.brightness,
+    contrast: state.contrast,
+    saturation: state.saturation,
+    palette: state.palette,
+    dither: state.dither,
+    ditherStrength: state.ditherStrength,
+    paletteSize: state.paletteSize,
+    colorDistance: state.colorDistance,
+  });
+}
+
+export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile, tasks } = {}) {
   const state = { ...DEFAULTS, ...preset };
+  const isAnimation = mediaSource.kind === 'animation';
   if (preset.autoPalette || state.palette === 'from-image') {
     state.palette = 'from-image';
     state.autoPalette = true;
   } else {
     state.autoPalette = false;
   }
+  if (isAnimation) state.exportFormat = 'gif';
+
   let sourceImage = null;
+  let sourceFrames = isAnimation ? mediaSource.frames.map((f) => f.canvas) : [];
+  let frameDelays = isAnimation ? mediaSource.frames.map((f) => f.delay) : [];
+  let selectedFrameIndex = 0;
   let result = null;
   let renderTimer = null;
+  let renderGeneration = 0;
   let displayScale = 1;
+  let previewWidth = 0;
+  let previewHeight = 0;
+  let isBusy = false;
+
+  let isPlaying = false;
+  let animRaf = null;
+  let animAccum = 0;
+  let animLastTime = 0;
+  let playFrameIndex = 0;
+  let playCache = new Map();
+  let playCacheOptions = null;
+  let playCacheKey = '';
+  let prefetchGen = 0;
 
   const root = document.createElement('div');
   root.className = 'editor-layout';
@@ -123,6 +183,7 @@ export function createEditor(imageSrc, preset = {}) {
         <div class="preview-badges">
           <span class="badge" id="size-badge">—</span>
           <span class="badge" id="pixel-badge">—</span>
+          <span class="badge hidden" id="frame-badge">—</span>
         </div>
       </div>
       <div class="preview-container" id="preview-container">
@@ -132,25 +193,14 @@ export function createEditor(imageSrc, preset = {}) {
         </div>
         <div class="processing-overlay hidden" id="processing">Processing…</div>
       </div>
-      <div class="export-bar">
-        <div class="control-group">
-          <label for="exportFormat">Format</label>
-          <select id="exportFormat">
-            <option value="png">PNG</option>
-            <option value="jpeg">JPEG</option>
-            <option value="webp">WebP</option>
-          </select>
-        </div>
-        <div class="control-group">
-          <label for="exportSize">Output size</label>
-          <select id="exportSize">
-            <option value="pixel">Actual pixel size</option>
-            <option value="source">Original image size</option>
-            <option value="double">2× pixel size</option>
-            <option value="quad">4× pixel size</option>
-          </select>
-        </div>
-        <button type="button" class="btn-primary" id="download-btn">Download</button>
+      <div class="frame-controls hidden" id="frame-controls">
+        <button type="button" class="play-btn" id="play-btn" aria-label="Play animation">
+          <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+          <svg class="icon-pause hidden" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" fill="currentColor"/></svg>
+        </button>
+      </div>
+      <div class="frame-strip hidden" id="frame-strip">
+        <div class="frame-strip-scroll" id="frame-strip-scroll"></div>
       </div>
     </div>`;
 
@@ -160,6 +210,98 @@ export function createEditor(imageSrc, preset = {}) {
   const processing = root.querySelector('#processing');
   const previewContainer = root.querySelector('#preview-container');
   const paletteSelect = root.querySelector('#palette');
+  const frameBadge = root.querySelector('#frame-badge');
+  const frameStrip = root.querySelector('#frame-strip');
+  const frameControls = root.querySelector('#frame-controls');
+  const frameStripScroll = root.querySelector('#frame-strip-scroll');
+  const playBtn = root.querySelector('#play-btn');
+
+  let exportFormatSelect;
+  let exportSizeSelect;
+  let downloadBtn;
+  let uploadBtn;
+
+  function mountHeaderControls() {
+    if (!headerBar) return;
+    headerBar.innerHTML = `
+      <button type="button" class="btn-primary" id="header-upload-btn">Upload file</button>
+      <label class="header-field">
+        <span class="sr-only">Format</span>
+        <select id="header-export-format" class="header-select"></select>
+      </label>
+      <label class="header-field">
+        <span class="sr-only">Output size</span>
+        <select id="header-export-size" class="header-select">
+          <option value="source">Original size</option>
+          <option value="pixel">Pixel size</option>
+          <option value="double">2× size</option>
+          <option value="quad">4× size</option>
+        </select>
+      </label>
+      <button type="button" class="btn-primary" id="header-download-btn">Download</button>`;
+
+    uploadBtn = headerBar.querySelector('#header-upload-btn');
+    exportFormatSelect = headerBar.querySelector('#header-export-format');
+    exportSizeSelect = headerBar.querySelector('#header-export-size');
+    downloadBtn = headerBar.querySelector('#header-download-btn');
+
+    uploadBtn.addEventListener('click', () => onUploadFile?.());
+    exportFormatSelect.addEventListener('change', (e) => { state.exportFormat = e.target.value; });
+    exportSizeSelect.addEventListener('change', (e) => { state.exportSize = e.target.value; });
+    downloadBtn.addEventListener('click', handleDownload);
+    populateExportFormats();
+    exportSizeSelect.value = state.exportSize;
+  }
+
+  function populateExportFormats() {
+    if (!exportFormatSelect) return;
+    if (isAnimation) {
+      exportFormatSelect.innerHTML = `
+        <option value="gif">GIF</option>
+        <option value="mp4">MP4 video</option>
+        <option value="png">PNG (selected frame)</option>`;
+      exportFormatSelect.value = ['gif', 'mp4', 'png'].includes(state.exportFormat) ? state.exportFormat : 'gif';
+    } else {
+      exportFormatSelect.innerHTML = `
+        <option value="png">PNG</option>
+        <option value="jpeg">JPEG</option>
+        <option value="webp">WebP</option>`;
+      exportFormatSelect.value = state.exportFormat;
+    }
+  }
+
+  function setHeaderDisabled(disabled) {
+    uploadBtn && (uploadBtn.disabled = disabled);
+    exportFormatSelect && (exportFormatSelect.disabled = disabled);
+    exportSizeSelect && (exportSizeSelect.disabled = disabled);
+    downloadBtn && (downloadBtn.disabled = disabled);
+    if (playBtn) playBtn.disabled = disabled;
+  }
+
+  function setPlayButtonState(playing) {
+    if (!playBtn) return;
+    playBtn.classList.toggle('playing', playing);
+    playBtn.setAttribute('aria-label', playing ? 'Pause animation' : 'Play animation');
+    playBtn.querySelector('.icon-play')?.classList.toggle('hidden', playing);
+    playBtn.querySelector('.icon-pause')?.classList.toggle('hidden', !playing);
+  }
+
+  function clearPlayCache() {
+    playCache.clear();
+    playCacheOptions = null;
+    playCacheKey = '';
+    prefetchGen++;
+  }
+
+  function stopPlayback({ restore = true } = {}) {
+    if (!isPlaying) return;
+    isPlaying = false;
+    if (animRaf) cancelAnimationFrame(animRaf);
+    animRaf = null;
+    animAccum = 0;
+    setPlayButtonState(false);
+    if (restore) renderPreviewFrame();
+  }
 
   function populatePalettes() {
     const curated = getAllPalettes()
@@ -201,16 +343,133 @@ export function createEditor(imageSrc, preset = {}) {
     return p?.colors || null;
   }
 
-  function fitPreview() {
-    if (!root.isConnected || !result) return;
+  function buildFrameStrip() {
+    if (!isAnimation) {
+      frameStrip.classList.add('hidden');
+      frameControls.classList.add('hidden');
+      return;
+    }
+    frameStrip.classList.remove('hidden');
+    frameControls.classList.remove('hidden');
+    frameStripScroll.innerHTML = '';
+
+    sourceFrames.forEach((srcCanvas, i) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `frame-thumb${i === selectedFrameIndex ? ' active' : ''}`;
+      btn.title = `Frame ${i + 1}`;
+      btn.setAttribute('aria-label', `Frame ${i + 1}`);
+
+      const thumbCanvas = document.createElement('canvas');
+      const scale = THUMB_HEIGHT / srcCanvas.height;
+      thumbCanvas.width = Math.max(1, Math.round(srcCanvas.width * scale));
+      thumbCanvas.height = THUMB_HEIGHT;
+      const tctx = thumbCanvas.getContext('2d');
+      tctx.imageSmoothingEnabled = false;
+      tctx.drawImage(srcCanvas, 0, 0, thumbCanvas.width, thumbCanvas.height);
+
+      const label = document.createElement('span');
+      label.className = 'frame-thumb-num';
+      label.textContent = String(i + 1);
+
+      btn.append(thumbCanvas, label);
+      btn.addEventListener('click', () => {
+        if (selectedFrameIndex === i) return;
+        stopPlayback();
+        selectedFrameIndex = i;
+        updateFrameStripActive();
+        scheduleRender();
+      });
+      frameStripScroll.appendChild(btn);
+    });
+  }
+
+  function updateFrameStripActive() {
+    frameStripScroll.querySelectorAll('.frame-thumb').forEach((btn, i) => {
+      const active = i === selectedFrameIndex;
+      btn.classList.toggle('active', active);
+      if (active) btn.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+    });
+  }
+
+  function updateBadges(frameIndex = selectedFrameIndex) {
+    const w = result?.pixelWidth;
+    const h = result?.pixelHeight;
+    if (w && h) root.querySelector('#size-badge').textContent = `${w} × ${h} px`;
+    const blockLabel = result
+      ? `Block: ${state.pixelSize}px · Preview ${result.width}×${result.height}`
+      : `Block: ${state.pixelSize}px`;
+    if (isAnimation) {
+      frameBadge.classList.remove('hidden');
+      frameBadge.textContent = `Frame ${frameIndex + 1}/${sourceFrames.length}`;
+      root.querySelector('#pixel-badge').textContent = `${mediaSource.label} · ${blockLabel}`;
+    } else {
+      frameBadge.classList.add('hidden');
+      root.querySelector('#pixel-badge').textContent = blockLabel;
+    }
+  }
+
+  function drawResultFrame(frameResult, frameIndex, { updateResult = true } = {}) {
+    if (updateResult) result = frameResult;
+    previewWidth = frameResult.width;
+    previewHeight = frameResult.height;
+    canvas.width = frameResult.width;
+    canvas.height = frameResult.height;
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(frameResult.canvas, 0, 0);
+    fitPreview();
+    updateBadges(frameIndex);
+  }
+
+  async function getPlayOptions() {
+    let options = buildPixelateOptions(state, getPaletteColors());
+    if (options.autoPalette) {
+      options = await resolvePixelateOptions(sourceFrames[selectedFrameIndex], options);
+    }
+    return options;
+  }
+
+  async function renderPlayFrame(index, options, gen) {
+    if (playCache.has(index)) return playCache.get(index);
+    const frameResult = await pixelateImage(sourceFrames[index], options);
+    if (gen !== prefetchGen) return null;
+    playCache.set(index, frameResult);
+    return frameResult;
+  }
+
+  async function runPrefetch(gen) {
+    while (isPlaying && gen === prefetchGen && playCacheOptions) {
+      let queued = false;
+      for (let offset = 0; offset <= PREFETCH_AHEAD; offset++) {
+        const idx = (playFrameIndex + offset) % sourceFrames.length;
+        if (playCache.has(idx)) continue;
+        await renderPlayFrame(idx, playCacheOptions, gen);
+        if (!isPlaying || gen !== prefetchGen) return;
+        queued = true;
+        await yieldToMain();
+        break;
+      }
+      if (!queued) await new Promise((r) => setTimeout(r, 16));
+    }
+  }
+
+  function fitPreviewFromSize(width, height) {
+    if (!root.isConnected || !width || !height) return;
     const availW = previewContainer.clientWidth;
     const availH = previewContainer.clientHeight;
-    displayScale = computeDisplayScale(availW, availH, result.width, result.height);
-    const dispW = result.width * displayScale;
-    const dispH = result.height * displayScale;
+    displayScale = computeDisplayScale(availW, availH, width, height);
+    const dispW = width * displayScale;
+    const dispH = height * displayScale;
     canvas.style.width = `${dispW}px`;
     canvas.style.height = `${dispH}px`;
-    updateGridOverlay(dispW, dispH);
+    if (result && state.showGrid && !isPlaying) updateGridOverlay(dispW, dispH);
+    else gridCanvas.classList.add('hidden');
+  }
+
+  function fitPreview() {
+    if (result) fitPreviewFromSize(result.width, result.height);
+    else if (previewWidth && previewHeight) fitPreviewFromSize(previewWidth, previewHeight);
   }
 
   function updateGridOverlay(dispW, dispH) {
@@ -257,54 +516,157 @@ export function createEditor(imageSrc, preset = {}) {
     }
   }
 
-  function drawToCanvas() {
-    if (!result) return;
-    canvas.width = result.width;
-    canvas.height = result.height;
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(result.canvas, 0, 0);
-    fitPreview();
-    root.querySelector('#size-badge').textContent = `${result.pixelWidth} × ${result.pixelHeight} px`;
-    root.querySelector('#pixel-badge').textContent = `Block: ${state.pixelSize}px · Preview ${result.width}×${result.height}`;
+  function scheduleRender() {
+    if (isPlaying) stopPlayback({ restore: false });
+    clearPlayCache();
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(render, isAnimation ? 150 : 80);
   }
 
-  function scheduleRender() {
-    clearTimeout(renderTimer);
-    renderTimer = setTimeout(render, 80);
+  function setLocalProcessing(active, message = 'Processing…') {
+    processing.textContent = message;
+    processing.classList.toggle('hidden', !active);
+  }
+
+  async function renderPreviewFrame() {
+    const options = buildPixelateOptions(state, getPaletteColors());
+    const source = isAnimation ? sourceFrames[selectedFrameIndex] : sourceImage;
+    result = await pixelateImage(source, options);
+    drawResultFrame(result, selectedFrameIndex);
+    updateFrameStripActive();
+  }
+
+  function togglePlayback() {
+    if (!isAnimation || isBusy) return;
+    if (isPlaying) {
+      stopPlayback();
+      return;
+    }
+    startPlayback();
+  }
+
+  async function startPlayback() {
+    if (!sourceFrames.length || isPlaying) return;
+
+    if (playBtn) playBtn.disabled = true;
+    clearPlayCache();
+    playCacheKey = settingsKey(state);
+    playCacheOptions = await getPlayOptions();
+
+    const gen = prefetchGen;
+    const warmup = Math.min(PREFETCH_AHEAD + 1, sourceFrames.length);
+    for (let i = 0; i < warmup; i++) {
+      const idx = (selectedFrameIndex + i) % sourceFrames.length;
+      const rendered = await renderPlayFrame(idx, playCacheOptions, gen);
+      if (gen !== prefetchGen) {
+        if (playBtn) playBtn.disabled = false;
+        return;
+      }
+      if (!rendered) {
+        if (playBtn) playBtn.disabled = false;
+        return;
+      }
+    }
+
+    isPlaying = true;
+    setPlayButtonState(true);
+    if (playBtn) playBtn.disabled = false;
+    playFrameIndex = selectedFrameIndex;
+    animLastTime = performance.now();
+    animAccum = 0;
+    drawResultFrame(playCache.get(playFrameIndex), playFrameIndex);
+    updateFrameStripActive();
+    runPrefetch(gen);
+
+    const tick = (now) => {
+      if (!isPlaying) return;
+      const delay = frameDelays[playFrameIndex] || 100;
+      animAccum += now - animLastTime;
+      animLastTime = now;
+      if (animAccum >= delay) {
+        const nextIndex = (playFrameIndex + 1) % sourceFrames.length;
+        const cached = playCache.get(nextIndex);
+        if (cached) {
+          animAccum = 0;
+          playFrameIndex = nextIndex;
+          selectedFrameIndex = playFrameIndex;
+          drawResultFrame(cached, playFrameIndex);
+          updateFrameStripActive();
+        }
+      }
+      animRaf = requestAnimationFrame(tick);
+    };
+    animRaf = requestAnimationFrame(tick);
+  }
+
+  async function renderAllFrames(signal, update) {
+    let options = buildPixelateOptions(state, getPaletteColors());
+    if (options.autoPalette) {
+      options = await resolvePixelateOptions(sourceFrames[selectedFrameIndex], options);
+    }
+    return pixelateFrames(sourceFrames, options, (done, total) => {
+      update(`Rendering frame ${done}/${total}…`, Math.round((done / total) * 100));
+    }, signal);
   }
 
   async function render() {
-    if (!sourceImage) return;
-    processing.classList.remove('hidden');
+    if (isAnimation ? !sourceFrames.length : !sourceImage) return;
+    const generation = ++renderGeneration;
+    setLocalProcessing(true, isAnimation ? 'Updating preview…' : 'Processing…');
+
     try {
-      const paletteColors = getPaletteColors();
-      const usePalette = state.autoPalette || (paletteColors && state.palette !== 'none');
-      const dither = usePalette ? state.dither : 'none';
-      result = await pixelateImage(sourceImage, {
-        pixelSize: state.pixelSize,
-        brightness: state.brightness,
-        contrast: state.contrast,
-        saturation: state.saturation,
-        paletteColors: usePalette ? paletteColors : null,
-        dither,
-        ditherStrength: state.ditherStrength,
-        autoPalette: state.autoPalette,
-        paletteSize: state.paletteSize,
-        colorDistance: state.colorDistance,
-        outputWidth: state.outputWidth,
-        outputHeight: state.outputHeight,
-        outputFit: state.outputFit,
-      });
-      drawToCanvas();
+      await renderPreviewFrame();
+      if (generation !== renderGeneration) return;
     } finally {
-      processing.classList.add('hidden');
+      if (generation === renderGeneration) setLocalProcessing(false);
+    }
+  }
+
+  async function handleDownload() {
+    if (!result || isBusy) return;
+    stopPlayback();
+    isBusy = true;
+    setHeaderDisabled(true);
+
+    try {
+      if (isAnimation && (state.exportFormat === 'gif' || state.exportFormat === 'mp4')) {
+        const exportResult = await tasks.run(async (signal, update) => {
+          const allFrames = await renderAllFrames(signal, update);
+          if (state.exportFormat === 'gif') {
+            update('Encoding GIF…', 95);
+            await downloadGif(allFrames, frameDelays, state.exportSize, (done, total) => {
+              update(`Encoding GIF ${done}/${total}…`, 95 + Math.round((done / total) * 5));
+            }, signal);
+          } else {
+            update('Encoding MP4…', 95);
+            await downloadMp4(allFrames, frameDelays, state.exportSize, (done, total) => {
+              update(`Encoding video ${done}/${total}…`, 95 + Math.round((done / total) * 5));
+            }, signal);
+          }
+          return true;
+        }, { label: 'Preparing export…', cancellable: true, progress: true });
+
+        if (exportResult?.cancelled) await renderPreviewFrame();
+        return;
+      }
+
+      const out = pickExportCanvas(result, state.exportSize);
+      if (isAnimation && state.exportFormat === 'png') {
+        downloadCanvas(out, 'pixel-art.png', 'png', state.exportQuality);
+        return;
+      }
+      const ext = state.exportFormat === 'jpeg' ? 'jpg' : state.exportFormat;
+      downloadCanvas(out, `pixel-art.${ext}`, state.exportFormat, state.exportQuality);
+    } finally {
+      isBusy = false;
+      setHeaderDisabled(false);
     }
   }
 
   function bindRange(id, key) {
     const el = root.querySelector(`#${id}`);
     const val = root.querySelector(`#val-${id}`);
+    initRangeSlider(el);
     el.addEventListener('input', () => {
       state[key] = Number(el.value);
       if (val) val.textContent = id === 'ditherStrength' ? `${state[key]}%` : state[key];
@@ -337,15 +699,12 @@ export function createEditor(imageSrc, preset = {}) {
     state.showGrid = e.target.checked;
     fitPreview();
   });
-  root.querySelector('#exportFormat').addEventListener('change', (e) => {
-    state.exportFormat = e.target.value;
-  });
-  root.querySelector('#exportSize').addEventListener('change', (e) => {
-    state.exportSize = e.target.value;
-  });
+  playBtn.addEventListener('click', togglePlayback);
 
   root.querySelector('#reset-all').addEventListener('click', () => {
+    stopPlayback();
     Object.assign(state, DEFAULTS, preset);
+    if (isAnimation) state.exportFormat = 'gif';
     if (preset.autoPalette) {
       state.palette = 'from-image';
       state.autoPalette = true;
@@ -357,26 +716,17 @@ export function createEditor(imageSrc, preset = {}) {
       el.value = state[el.id];
       const val = root.querySelector(`#val-${el.id}`);
       if (val) val.textContent = el.id === 'ditherStrength' ? `${state[el.id]}%` : state[el.id];
+      el.dispatchEvent(new Event('input'));
     });
     root.querySelector('#ditherMethod').value = state.dither;
     root.querySelector('#colorDistance').value = state.colorDistance;
-    root.querySelector('#exportFormat').value = state.exportFormat;
-    root.querySelector('#exportSize').value = state.exportSize;
+    if (exportSizeSelect) exportSizeSelect.value = state.exportSize;
+    populateExportFormats();
     updateDitherStrengthVisibility();
     root.querySelector('#showGrid').checked = state.showGrid;
     paletteSelect.value = state.palette;
     updatePaletteUI();
     scheduleRender();
-  });
-
-  root.querySelector('#download-btn').addEventListener('click', () => {
-    if (!result) return;
-    let out = result.pixelCanvas || result.canvas;
-    if (state.exportSize === 'source') out = result.canvas;
-    else if (state.exportSize === 'double') out = scaleCanvas(result.canvas, result.width * 2, result.height * 2);
-    else if (state.exportSize === 'quad') out = scaleCanvas(result.canvas, result.width * 4, result.height * 4);
-    const ext = state.exportFormat === 'jpeg' ? 'jpg' : state.exportFormat;
-    downloadCanvas(out, `pixel-art.${ext}`, state.exportFormat, state.exportQuality);
   });
 
   root.querySelector('#import-lospec').addEventListener('click', async () => {
@@ -403,7 +753,9 @@ export function createEditor(imageSrc, preset = {}) {
     }
   });
 
+  mountHeaderControls();
   populatePalettes();
+  buildFrameStrip();
 
   if (preset.dither) {
     const method = typeof preset.dither === 'string' ? preset.dither : 'floyd-steinberg';
@@ -412,23 +764,38 @@ export function createEditor(imageSrc, preset = {}) {
   }
   if (preset.palette && preset.palette !== 'from-image') paletteSelect.value = preset.palette;
   root.querySelector('#colorDistance').value = state.colorDistance;
-  root.querySelector('#exportFormat').value = state.exportFormat;
-  root.querySelector('#exportSize').value = state.exportSize;
   updateDitherStrengthVisibility();
 
   const resizeObserver = new ResizeObserver(() => fitPreview());
   resizeObserver.observe(previewContainer);
   window.addEventListener('resize', fitPreview);
 
-  const img = new Image();
-  img.onload = () => { sourceImage = img; render(); };
-  img.src = imageSrc;
+  root._cleanup = () => {
+    if (isPlaying) {
+      isPlaying = false;
+      if (animRaf) cancelAnimationFrame(animRaf);
+      animRaf = null;
+    }
+    clearPlayCache();
+    resizeObserver.disconnect();
+    if (headerBar) headerBar.innerHTML = '';
+  };
+
+  if (isAnimation) {
+    render();
+  } else {
+    const img = new Image();
+    img.onload = () => { sourceImage = img; render(); };
+    img.src = mediaSource.url;
+  }
 
   return root;
 }
 
-export function mountEditor(container, imageSrc, preset) {
+export function mountEditor(container, mediaSource, options) {
   container.innerHTML = '';
   container.classList.add('visible');
-  container.appendChild(createEditor(imageSrc, preset));
+  const editor = createEditor(mediaSource, {}, options);
+  container.appendChild(editor);
+  return editor;
 }

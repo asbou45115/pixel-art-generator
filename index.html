@@ -1,11 +1,17 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#ffffff">
+  <meta name="theme-color" content="#12141c">
+  <script>
+    (function () {
+      var t = localStorage.getItem('pag-theme');
+      document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark';
+    })();
+  </script>
   <title>Pixel Art Generator</title>
-  <meta name="description" content="Turn images into pixel art in your browser. Live preview, palettes, dithering, and private client-side processing for PNG, JPG, GIF, and WEBP.">
+  <meta name="description" content="Turn images, GIFs, and videos into pixel art in your browser. Live preview, palettes, dithering, and private client-side processing.">
   <link rel="stylesheet" href="/assets/css/styles.css">
 </head>
 <body>
@@ -21,10 +27,26 @@
             <span></span><span></span><span></span>
           </div>
           <h1>Pixel Art<br>Generator</h1>
-          <p>Drop in a photo. Tune pixels, palettes, and dithering. Export — all locally in your browser.</p>
+          <p>Drop in an image, GIF, or video. Tune pixels, palettes, and dithering. Export — all locally in your browser.</p>
         </div>
-        <div id="upload-mount"></div>
-        <p class="landing-formats">PNG · JPG · GIF · WEBP · up to 10 MB</p>
+        <div class="landing-upload">
+          <div id="upload-mount"></div>
+          <p class="landing-formats">PNG · JPG · GIF · WEBP · MP4 · WebM</p>
+        </div>
+        <figure class="landing-showcase" aria-label="Before and after example">
+          <div class="showcase-pair">
+            <div class="showcase-frame">
+              <img src="/assets/examples/mt_fuji_before.png" alt="Original photo of Mount Fuji" width="640" height="480" loading="lazy">
+              <span class="showcase-label">Before</span>
+            </div>
+            <div class="showcase-arrow" aria-hidden="true">→</div>
+            <div class="showcase-frame showcase-frame--pixel">
+              <img src="/assets/examples/mt_fuji_after.png" alt="Pixel art version of Mount Fuji" width="640" height="480" loading="lazy">
+              <span class="showcase-label">After</span>
+            </div>
+          </div>
+          <figcaption class="showcase-caption">Mount Fuji — original photo vs pixel art output</figcaption>
+        </figure>
       </div>
     </section>
     <section id="editor-section" class="editor-section"></section>

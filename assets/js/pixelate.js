@@ -1,4 +1,4 @@
-import { hexToRgb } from './palettes.js';
+import { hexToRgb, rgbToHex } from './palettes.js';
 
 const MAX_EDGE = 2200;
 
@@ -356,6 +356,76 @@ export async function pixelateImage(source, options = {}) {
     sourceWidth: sourceW,
     sourceHeight: sourceH,
   };
+}
+
+async function prepareSourceFrame(source, options) {
+  const {
+    pixelSize = 8,
+    brightness = 0,
+    contrast = 0,
+    saturation = 0,
+    outputWidth = 0,
+    outputHeight = 0,
+    outputFit = 'cover',
+  } = options;
+
+  const filterString = buildFilterString(brightness, contrast, saturation);
+  const img = typeof source === 'string' ? await loadImage(source) : source;
+  const resized = resizeImage(img, MAX_EDGE);
+  const sourceW = resized.width || resized.naturalWidth;
+  const sourceH = resized.height || resized.naturalHeight;
+
+  let pixelCanvas;
+  let pixelW;
+  let pixelH;
+
+  if (outputWidth > 0 && outputHeight > 0) {
+    pixelCanvas = fitToCanvas(resized, outputWidth, outputHeight, outputFit === 'contain' ? 'contain' : 'cover', filterString);
+    pixelW = pixelCanvas.width;
+    pixelH = pixelCanvas.height;
+  } else if (pixelSize > 1) {
+    pixelW = Math.max(1, Math.floor(sourceW / pixelSize));
+    pixelH = Math.max(1, Math.floor(sourceH / pixelSize));
+    pixelCanvas = downscaleSmooth(resized, sourceW, sourceH, pixelW, pixelH, filterString);
+  } else {
+    pixelCanvas = createCanvas(sourceW, sourceH);
+    const ctx = pixelCanvas.getContext('2d');
+    ctx.filter = filterString;
+    ctx.drawImage(resized, 0, 0);
+    ctx.filter = 'none';
+    pixelW = sourceW;
+    pixelH = sourceH;
+  }
+
+  return { pixelCanvas, pixelW, pixelH };
+}
+
+export async function getAutoPaletteHexColors(source, options = {}) {
+  const { paletteSize = 16 } = options;
+  const { pixelCanvas, pixelW, pixelH } = await prepareSourceFrame(source, options);
+  const ctx = pixelCanvas.getContext('2d');
+  const palRgb = extractPalette(ctx.getImageData(0, 0, pixelW, pixelH), clamp(paletteSize, 2, 64));
+  return palRgb.map((c) => rgbToHex(c[0], c[1], c[2]));
+}
+
+export async function resolvePixelateOptions(source, options = {}) {
+  const { paletteColors, autoPalette } = options;
+  if (paletteColors?.length) return options;
+  if (!autoPalette) return options;
+  const colors = await getAutoPaletteHexColors(source, options);
+  return { ...options, autoPalette: false, paletteColors: colors };
+}
+
+export async function pixelateFrames(sources, options = {}, onProgress, signal) {
+  const resolved = await resolvePixelateOptions(sources[0], options);
+  const results = [];
+  for (let i = 0; i < sources.length; i++) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    results.push(await pixelateImage(sources[i], resolved));
+    onProgress?.(i + 1, sources.length);
+    if (i < sources.length - 1) await new Promise((r) => setTimeout(r, 0));
+  }
+  return results;
 }
 
 export function scaleCanvas(src, targetW, targetH) {
