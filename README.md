@@ -35,7 +35,7 @@ Upload any of these from the landing page, or use **Upload file** in the editor 
 
 ## Features
 
-- Upload PNG, JPG, GIF, WEBP, MP4, or WebM — no file size limit (client-side only)
+- Upload PNG, JPG, GIF, WEBP, MP4, or WebM — no file size limit; still images process at full resolution (client-side only)
 - Animated GIF and video support with a frame strip to preview individual frames
 - Play animation preview in the browser (pixelated frames prefetched ahead for smooth playback)
 - Dark mode by default with light/dark toggle in the header
@@ -68,9 +68,20 @@ Edges are detected on the downscaled image (before quantization) for cleaner lin
 
 ## Limits
 
-- GIFs and videos are sampled to 150 frames and 15 seconds of video for performance
-- Animated GIF decoding requires a browser with `ImageDecoder` support (Chrome, Edge, Firefox)
+The app does not artificially cap frame count, video duration, or image dimensions. Practical limits come from your browser and device:
+
+- Animated GIF decoding requires `ImageDecoder` (Chrome, Edge, Firefox)
+- Full-frame video capture requires `requestVideoFrameCallback` (Chrome, Edge, Firefox, Safari 15.4+)
 - MP4 export uses WebCodecs when available, otherwise falls back to the browser's native recorder
+- The H.264 profile and level are probed per export, so large frame sizes are not rejected by the encoder
+- GIFs and videos open quickly; frames are decoded on demand instead of buffered in memory
+- Videos index in the background (frame timing only) while you edit; playback is available once indexing finishes
+- Export processes one frame at a time (capture → pixelate → encode) so peak memory stays low
+- Export reuses a fixed set of canvases instead of allocating per frame, which keeps long exports inside the browser's canvas memory budget
+- Where the File System Access API is available, MP4 data is written straight to the file you choose rather than held in RAM
+- Background video indexing runs at playback speed; export of long videos also replays the source at least once
+- Exports fail loudly instead of writing a partially encoded file, so a broken export never produces a silently black video
+- Very large animations and high-resolution images use significant RAM; the browser or OS may kill the tab if memory is exhausted
 
 ## Project structure
 

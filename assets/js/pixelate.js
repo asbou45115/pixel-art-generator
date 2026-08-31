@@ -1,7 +1,5 @@
 import { hexToRgb, rgbToHex } from './palettes.js';
 
-const MAX_EDGE = 2200;
-
 export function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
@@ -19,20 +17,6 @@ function loadImage(src) {
   });
 }
 
-function resizeImage(img, maxEdge) {
-  const w = img.naturalWidth || img.width;
-  const h = img.naturalHeight || img.height;
-  const scale = Math.min(1, maxEdge / Math.max(w, h));
-  if (scale >= 1) return img;
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.round(w * scale);
-  canvas.height = Math.round(h * scale);
-  const ctx = canvas.getContext('2d');
-  ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-  return canvas;
-}
-
 function buildFilterString(brightness, contrast, saturation) {
   const parts = [];
   if (brightness !== 0) parts.push(`brightness(${100 + brightness}%)`);
@@ -46,6 +30,49 @@ function createCanvas(w, h) {
   canvas.width = w;
   canvas.height = h;
   return canvas;
+}
+
+/** Immediately drops a canvas' backing store instead of waiting for GC. */
+export function releaseCanvas(canvas) {
+  if (!canvas || typeof canvas.width !== 'number') return;
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
+/**
+ * Keeps one reusable canvas per role. Long exports allocate thousands of frames;
+ * without reuse the browser hits its canvas memory ceiling and hands back blank
+ * surfaces, which encode as solid black.
+ */
+export function createCanvasStore() {
+  const canvases = new Map();
+  return {
+    get(key, w, h) {
+      let canvas = canvases.get(key);
+      if (!canvas) {
+        canvas = document.createElement('canvas');
+        canvases.set(key, canvas);
+      }
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      return canvas;
+    },
+    release() {
+      for (const canvas of canvases.values()) releaseCanvas(canvas);
+      canvases.clear();
+    },
+  };
+}
+
+function prepareTarget(target, w, h) {
+  if (!target) return createCanvas(w, h);
+  if (target.width !== w || target.height !== h) {
+    target.width = w;
+    target.height = h;
+  }
+  return target;
 }
 
 // CIE LAB conversion
@@ -241,22 +268,27 @@ function applyPalette(canvas, paletteRgb, options) {
   ctx.putImageData(quantizeImageData(imageData, paletteRgb, options), 0, 0);
 }
 
-function downscaleSmooth(src, srcW, srcH, dw, dh, filterString) {
-  const canvas = createCanvas(dw, dh);
+function downscaleSmooth(src, srcW, srcH, dw, dh, filterString, target = null) {
+  const canvas = prepareTarget(target, dw, dh);
   const ctx = canvas.getContext('2d');
   ctx.filter = filterString;
   ctx.imageSmoothingEnabled = true;
+  // 'copy' replaces whatever a reused canvas already held, so no separate clear pass
+  ctx.globalCompositeOperation = 'copy';
   ctx.drawImage(src, 0, 0, srcW, srcH, 0, 0, dw, dh);
+  ctx.globalCompositeOperation = 'source-over';
   ctx.filter = 'none';
   return canvas;
 }
 
-function upscaleNearest(src, sw, sh, tw, th) {
-  const canvas = createCanvas(tw, th);
+function upscaleNearest(src, sw, sh, tw, th, target = null) {
+  const canvas = prepareTarget(target, tw, th);
   const ctx = canvas.getContext('2d');
   ctx.imageSmoothingEnabled = false;
   ctx.filter = 'none';
+  ctx.globalCompositeOperation = 'copy';
   ctx.drawImage(src, 0, 0, sw, sh, 0, 0, tw, th);
+  ctx.globalCompositeOperation = 'source-over';
   return canvas;
 }
 
@@ -458,8 +490,8 @@ function applyOutlinesToCanvas(canvas, edgeSourceData, options) {
   ctx.putImageData(imageData, 0, 0);
 }
 
-function fitToCanvas(img, targetW, targetH, fit, filterString) {
-  const canvas = createCanvas(targetW, targetH);
+function fitToCanvas(img, targetW, targetH, fit, filterString, target = null) {
+  const canvas = prepareTarget(target, targetW, targetH);
   const ctx = canvas.getContext('2d');
   const sw = img.width || img.naturalWidth;
   const sh = img.height || img.naturalHeight;
@@ -472,7 +504,9 @@ function fitToCanvas(img, targetW, targetH, fit, filterString) {
   const dy = (targetH - dh) / 2;
   ctx.filter = filterString;
   ctx.imageSmoothingEnabled = true;
+  ctx.globalCompositeOperation = 'copy';
   ctx.drawImage(img, dx, dy, dw, dh);
+  ctx.globalCompositeOperation = 'source-over';
   ctx.filter = 'none';
   return canvas;
 }
@@ -495,6 +529,8 @@ export async function pixelateImage(source, options = {}) {
     edges = 'none',
     edgeThreshold = 50,
     edgeThickness = 1,
+    forExport = false,
+    canvasStore = null,
   } = options;
 
   const filterString = buildFilterString(brightness, contrast, saturation);
@@ -502,9 +538,8 @@ export async function pixelateImage(source, options = {}) {
   const edgeOpts = { edges, edgeThreshold, edgeThickness };
 
   const img = typeof source === 'string' ? await loadImage(source) : source;
-  const resized = resizeImage(img, MAX_EDGE);
-  const sourceW = resized.width || resized.naturalWidth;
-  const sourceH = resized.height || resized.naturalHeight;
+  const sourceW = img.width || img.naturalWidth;
+  const sourceH = img.height || img.naturalHeight;
 
   let pixelCanvas;
   let previewCanvas;
@@ -512,7 +547,14 @@ export async function pixelateImage(source, options = {}) {
   let pixelH;
 
   if (outputWidth > 0 && outputHeight > 0) {
-    pixelCanvas = fitToCanvas(resized, outputWidth, outputHeight, outputFit === 'contain' ? 'contain' : 'cover', filterString);
+    pixelCanvas = fitToCanvas(
+      img,
+      outputWidth,
+      outputHeight,
+      outputFit === 'contain' ? 'contain' : 'cover',
+      filterString,
+      canvasStore?.get('pixel', outputWidth, outputHeight),
+    );
     pixelW = pixelCanvas.width;
     pixelH = pixelCanvas.height;
     previewCanvas = pixelCanvas;
@@ -520,13 +562,25 @@ export async function pixelateImage(source, options = {}) {
     pixelW = Math.max(1, Math.floor(sourceW / pixelSize));
     pixelH = Math.max(1, Math.floor(sourceH / pixelSize));
     // Smooth downscale first (averages colors per block), then quantize at pixel resolution
-    pixelCanvas = downscaleSmooth(resized, sourceW, sourceH, pixelW, pixelH, filterString);
-    previewCanvas = upscaleNearest(pixelCanvas, pixelW, pixelH, sourceW, sourceH);
+    pixelCanvas = downscaleSmooth(
+      img,
+      sourceW,
+      sourceH,
+      pixelW,
+      pixelH,
+      filterString,
+      canvasStore?.get('pixel', pixelW, pixelH),
+    );
+    previewCanvas = forExport
+      ? pixelCanvas
+      : upscaleNearest(pixelCanvas, pixelW, pixelH, sourceW, sourceH, canvasStore?.get('preview', sourceW, sourceH));
   } else {
-    pixelCanvas = createCanvas(sourceW, sourceH);
+    pixelCanvas = prepareTarget(canvasStore?.get('pixel', sourceW, sourceH), sourceW, sourceH);
     const ctx = pixelCanvas.getContext('2d');
     ctx.filter = filterString;
-    ctx.drawImage(resized, 0, 0);
+    ctx.globalCompositeOperation = 'copy';
+    ctx.drawImage(img, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
     ctx.filter = 'none';
     pixelW = sourceW;
     pixelH = sourceH;
@@ -547,27 +601,32 @@ export async function pixelateImage(source, options = {}) {
 
   if (palRgb) {
     applyPalette(pixelCanvas, palRgb, quantizeOpts);
-    if (previewCanvas !== pixelCanvas) {
-      previewCanvas = upscaleNearest(pixelCanvas, pixelW, pixelH, sourceW, sourceH);
+    if (!forExport && previewCanvas !== pixelCanvas) {
+      previewCanvas = upscaleNearest(pixelCanvas, pixelW, pixelH, sourceW, sourceH, previewCanvas);
     }
   }
 
   if (edgeSourceData) {
     applyOutlinesToCanvas(pixelCanvas, edgeSourceData, edgeOpts);
-    if (previewCanvas !== pixelCanvas) {
-      previewCanvas = upscaleNearest(pixelCanvas, pixelW, pixelH, sourceW, sourceH);
+    if (!forExport && previewCanvas !== pixelCanvas) {
+      previewCanvas = upscaleNearest(pixelCanvas, pixelW, pixelH, sourceW, sourceH, previewCanvas);
     }
   }
 
+  const outCanvas = forExport ? pixelCanvas : previewCanvas;
+  const outW = forExport ? sourceW : outCanvas.width;
+  const outH = forExport ? sourceH : outCanvas.height;
+
   return {
-    canvas: previewCanvas,
+    canvas: outCanvas,
     pixelCanvas,
-    width: previewCanvas.width,
-    height: previewCanvas.height,
+    width: outW,
+    height: outH,
     pixelWidth: pixelW,
     pixelHeight: pixelH,
     sourceWidth: sourceW,
     sourceHeight: sourceH,
+    pooled: !!canvasStore,
   };
 }
 
@@ -584,27 +643,26 @@ async function prepareSourceFrame(source, options) {
 
   const filterString = buildFilterString(brightness, contrast, saturation);
   const img = typeof source === 'string' ? await loadImage(source) : source;
-  const resized = resizeImage(img, MAX_EDGE);
-  const sourceW = resized.width || resized.naturalWidth;
-  const sourceH = resized.height || resized.naturalHeight;
+  const sourceW = img.width || img.naturalWidth;
+  const sourceH = img.height || img.naturalHeight;
 
   let pixelCanvas;
   let pixelW;
   let pixelH;
 
   if (outputWidth > 0 && outputHeight > 0) {
-    pixelCanvas = fitToCanvas(resized, outputWidth, outputHeight, outputFit === 'contain' ? 'contain' : 'cover', filterString);
+    pixelCanvas = fitToCanvas(img, outputWidth, outputHeight, outputFit === 'contain' ? 'contain' : 'cover', filterString);
     pixelW = pixelCanvas.width;
     pixelH = pixelCanvas.height;
   } else if (pixelSize > 1) {
     pixelW = Math.max(1, Math.floor(sourceW / pixelSize));
     pixelH = Math.max(1, Math.floor(sourceH / pixelSize));
-    pixelCanvas = downscaleSmooth(resized, sourceW, sourceH, pixelW, pixelH, filterString);
+    pixelCanvas = downscaleSmooth(img, sourceW, sourceH, pixelW, pixelH, filterString);
   } else {
     pixelCanvas = createCanvas(sourceW, sourceH);
     const ctx = pixelCanvas.getContext('2d');
     ctx.filter = filterString;
-    ctx.drawImage(resized, 0, 0);
+    ctx.drawImage(img, 0, 0);
     ctx.filter = 'none';
     pixelW = sourceW;
     pixelH = sourceH;
@@ -641,8 +699,8 @@ export async function pixelateFrames(sources, options = {}, onProgress, signal) 
   return results;
 }
 
-export function scaleCanvas(src, targetW, targetH) {
-  return upscaleNearest(src, src.width, src.height, targetW, targetH);
+export function scaleCanvas(src, targetW, targetH, target = null) {
+  return upscaleNearest(src, src.width, src.height, targetW, targetH, target);
 }
 
 export function downloadCanvas(canvas, filename, format = 'png', quality = 0.92) {
