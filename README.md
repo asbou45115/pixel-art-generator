@@ -73,11 +73,15 @@ The app does not artificially cap frame count, video duration, or image dimensio
 - Animated GIF decoding requires `ImageDecoder` (Chrome, Edge, Firefox)
 - Full-frame video capture requires `requestVideoFrameCallback` (Chrome, Edge, Firefox, Safari 15.4+)
 - MP4 export uses WebCodecs when available, otherwise falls back to the browser's native recorder
+- The H.264 profile and level are probed per export, so large frame sizes are not rejected by the encoder
 - GIFs and videos open quickly; frames are decoded on demand instead of buffered in memory
 - Videos index in the background (frame timing only) while you edit; playback is available once indexing finishes
 - Export processes one frame at a time (capture → pixelate → encode) so peak memory stays low
+- Export reuses a fixed set of canvases instead of allocating per frame, which keeps long exports inside the browser's canvas memory budget
+- Where the File System Access API is available, MP4 data is written straight to the file you choose rather than held in RAM
 - Background video indexing runs at playback speed; export of long videos also replays the source at least once
-- Very large single frames (high-resolution stills) still use significant RAM during processing
+- Exports fail loudly instead of writing a partially encoded file, so a broken export never produces a silently black video
+- Very large animations and high-resolution images use significant RAM; the browser or OS may kill the tab if memory is exhausted
 
 ## Project structure
 

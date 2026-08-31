@@ -11,13 +11,51 @@ export function detectMediaKind(file) {
   return null;
 }
 
-function canvasFromSource(source, w, h) {
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
+function canvasFromSource(source, w, h, target = null) {
+  const canvas = target || document.createElement('canvas');
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
   const ctx = canvas.getContext('2d');
+  // 'copy' fully replaces the previous frame when the canvas is reused
+  ctx.globalCompositeOperation = 'copy';
   ctx.drawImage(source, 0, 0, w, h);
+  ctx.globalCompositeOperation = 'source-over';
   return canvas;
+}
+
+function releaseCanvas(canvas) {
+  if (!canvas || typeof canvas.width !== 'number') return;
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
+/**
+ * Round-robin canvas pool. Frame walks allocate one canvas per frame otherwise,
+ * which exhausts the browser's canvas memory on long media and silently yields
+ * blank surfaces.
+ */
+function createFramePool(size, width, height) {
+  const canvases = [];
+  let next = 0;
+  return {
+    acquire() {
+      let canvas = canvases[next];
+      if (!canvas) {
+        canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        canvases[next] = canvas;
+      }
+      next = (next + 1) % size;
+      return canvas;
+    },
+    release() {
+      for (const canvas of canvases) releaseCanvas(canvas);
+      canvases.length = 0;
+    },
+  };
 }
 
 function createAccessLock() {
@@ -218,13 +256,24 @@ export class GifAnimationSource {
   }
 
   async forEachFrame(callback, onProgress, signal) {
+    return this._accessLock.run(() => this._forEachFrameLoop(callback, onProgress, signal));
+  }
+
+  async _forEachFrameLoop(callback, onProgress, signal) {
     await this.ready();
-    for (let i = 0; i < this.frameCount; i++) {
-      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      const canvas = await this.getSourceFrame(i, signal);
-      const delay = await this.getDelay(i);
-      await callback(canvas, delay, i);
-      onProgress?.(i + 1, this.frameCount);
+    let frameCanvas = null;
+    try {
+      for (let i = 0; i < this.frameCount; i++) {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        const { image } = await this.decoder.decode({ frameIndex: i });
+        this.delays[i] = image.duration ? Math.max(MIN_FRAME_DELAY, image.duration / 1000) : DEFAULT_FRAME_DELAY;
+        frameCanvas = canvasFromSource(image, image.displayWidth, image.displayHeight, frameCanvas);
+        image.close();
+        await callback(frameCanvas, this.delays[i], i);
+        onProgress?.(i + 1, this.frameCount);
+      }
+    } finally {
+      releaseCanvas(frameCanvas);
     }
   }
 
@@ -318,6 +367,10 @@ export class VideoAnimationSource {
   }
 
   async forEachFrame(callback, onProgress, signal) {
+    return this._accessLock.run(() => this._forEachFramePlayback(callback, onProgress, signal));
+  }
+
+  async _forEachFramePlayback(callback, onProgress, signal) {
     await this.ready();
     if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype)) {
       throw new Error(
@@ -332,8 +385,10 @@ export class VideoAnimationSource {
     const capturedTimes = [];
     let pendingCanvas = null;
     let pendingIndex = -1;
+    // Two slots: the frame being handed to the callback and the one just captured.
+    const pool = createFramePool(2, this.width, this.height);
 
-    return new Promise((resolve, reject) => {
+    const walk = new Promise((resolve, reject) => {
       let finished = false;
 
       const cleanup = () => {
@@ -395,7 +450,7 @@ export class VideoAnimationSource {
         capturedDelays.push(DEFAULT_FRAME_DELAY);
         capturedTimes.push(mediaTime);
 
-        const canvas = canvasFromSource(this.video, this.width, this.height);
+        const canvas = canvasFromSource(this.video, this.width, this.height, pool.acquire());
         const currentIndex = frameIndex;
         frameIndex++;
 
@@ -429,6 +484,12 @@ export class VideoAnimationSource {
       this.video.currentTime = 0;
       scheduleNext();
     });
+
+    try {
+      await walk;
+    } finally {
+      pool.release();
+    }
   }
 
   cancelIndexing() {

@@ -1,5 +1,5 @@
 import { getAllPalettes, loadCustomPalettes, saveCustomPalettes } from './palettes.js';
-import { pixelateImage, resolvePixelateOptions, downloadCanvas } from './pixelate.js';
+import { pixelateImage, resolvePixelateOptions, downloadCanvas, createCanvasStore } from './pixelate.js';
 import { downloadAnimationStream, pickExportCanvas } from './media-export.js';
 import { initRangeSlider } from './range-input.js';
 import { yieldToMain } from './progress.js';
@@ -86,7 +86,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   } else {
     state.autoPalette = false;
   }
-  if (isAnimation) state.exportFormat = 'gif';
+  if (isAnimation) state.exportFormat = 'mp4';
 
   const animation = isAnimation ? mediaSource.animation : null;
   let sourceImage = null;
@@ -294,10 +294,10 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     if (!exportFormatSelect) return;
     if (isAnimation) {
       exportFormatSelect.innerHTML = `
-        <option value="gif">GIF</option>
         <option value="mp4">MP4 video</option>
+        <option value="gif">GIF</option>
         <option value="png">PNG (selected frame)</option>`;
-      exportFormatSelect.value = ['gif', 'mp4', 'png'].includes(state.exportFormat) ? state.exportFormat : 'gif';
+      exportFormatSelect.value = ['gif', 'mp4', 'png'].includes(state.exportFormat) ? state.exportFormat : 'mp4';
     } else {
       exportFormatSelect.innerHTML = `
         <option value="png">PNG</option>
@@ -802,24 +802,31 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     let options = buildPixelateOptions(state, getPaletteColors());
     let paletteResolved = !options.autoPalette;
     const wasIndexed = animation.isIndexed?.();
+    // Reuse the per-frame canvases for the whole export; allocating fresh ones
+    // per frame exhausts canvas memory on long media and yields blank frames.
+    const canvasStore = createCanvasStore();
 
-    await downloadAnimationStream(
-      animation,
-      state.exportFormat,
-      async (sourceCanvas, index) => {
-        if (!paletteResolved) {
-          options = await resolvePixelateOptions(sourceCanvas, options);
-          paletteResolved = true;
-        }
-        return pixelateImage(sourceCanvas, options);
-      },
-      state.exportSize,
-      (done, total) => {
-        const count = total || done;
-        update(`Exporting frame ${done}/${count}…`, Math.round((done / count) * 100));
-      },
-      signal,
-    );
+    try {
+      await downloadAnimationStream(
+        animation,
+        state.exportFormat,
+        async (sourceCanvas, index) => {
+          if (!paletteResolved) {
+            options = await resolvePixelateOptions(sourceCanvas, options);
+            paletteResolved = true;
+          }
+          return pixelateImage(sourceCanvas, { ...options, forExport: true, canvasStore });
+        },
+        state.exportSize,
+        (done, total) => {
+          const count = total || done;
+          update(`Exporting frame ${done}/${count}…`, Math.round((done / count) * 100));
+        },
+        signal,
+      );
+    } finally {
+      canvasStore.release();
+    }
 
     if (!wasIndexed && animation.isIndexed?.()) {
       onAnimationIndexed();
@@ -849,8 +856,15 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
     try {
       if (isAnimation && (state.exportFormat === 'gif' || state.exportFormat === 'mp4')) {
         const exportResult = await tasks.run(async (signal, update) => {
-          await exportAnimation(signal, update);
-          return true;
+          try {
+            await exportAnimation(signal, update);
+            return true;
+          } catch (err) {
+            if (err?.name !== 'AbortError') {
+              alert(err?.message || 'Export failed.');
+            }
+            throw err;
+          }
         }, { label: 'Preparing export…', cancellable: true, progress: true });
 
         if (exportResult?.cancelled) await renderPreviewFrame();
@@ -923,7 +937,7 @@ export function createEditor(mediaSource, preset = {}, { headerBar, onUploadFile
   root.querySelector('#reset-all').addEventListener('click', () => {
     stopPlayback();
     Object.assign(state, DEFAULTS, preset);
-    if (isAnimation) state.exportFormat = 'gif';
+    if (isAnimation) state.exportFormat = 'mp4';
     if (preset.autoPalette) {
       state.palette = 'from-image';
       state.autoPalette = true;
